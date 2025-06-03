@@ -1,0 +1,13 @@
+# Configuration for the Rust GGEZ Circles App
+
+[window]
+width = 2048.0
+height = 1024.0
+title = "My Configured Circles App!"
+
+[circle]
+radius = 25.0
+color_r = 255 # Red component (0-255)
+color_g = 105 # Green component (0-255)
+color_b = 180 # Blue component (0-255) - A nice pink/purple
+

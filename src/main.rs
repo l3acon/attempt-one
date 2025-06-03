@@ -5,67 +5,84 @@ use ggez::event::{self, EventHandler, MouseButton};
 use ggez::glam::Vec2; // For 2D vectors (coordinates)
 use ggez::graphics::{self, Color, DrawMode, Mesh};
 use ggez::{Context, ContextBuilder, GameResult};
+use serde::{Deserialize, Serialize}; // Import Serialize
+use std::fs; // For file system operations
 
-// Constants for window size and title
-const SCREEN_WIDTH: f32 = 800.0;
-const SCREEN_HEIGHT: f32 = 600.0;
-const WINDOW_TITLE: &str = "Rust: Click to Add Multiple Circles";
+// --- Configuration Structs ---
+// Added Serialize to the derive macro for all config structs
+#[derive(Deserialize, Serialize, Debug)] 
+struct WindowConfig {
+    width: f32,
+    height: f32,
+    title: String,
+}
 
-// Structure to hold the application's state
+#[derive(Deserialize, Serialize, Debug, Clone)] 
+struct CircleConfig {
+    radius: f32,
+    color_r: u8,
+    color_g: u8,
+    color_b: u8,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+struct AppConfig {
+    window: WindowConfig,
+    circle: CircleConfig,
+}
+
+// --- AppState Struct ---
 struct AppState {
-    live_mouse_pos: Vec2,             // Current live mouse position for text display
-    clicked_circles_positions: Vec<Vec2>, // Stores the center positions of all clicked circles
-    circle_color: Color,              // Color for all circles
-    circle_radius: f32,               // Radius for all circles
+    live_mouse_pos: Vec2,
+    clicked_circles_positions: Vec<Vec2>,
+    circle_color: Color, 
+    circle_radius: f32,  
 }
 
 impl AppState {
-    // Constructor for our application state
-    fn new(_ctx: &mut Context) -> GameResult<AppState> {
+    fn new(_ctx: &mut Context, circle_config: &CircleConfig) -> GameResult<AppState> {
         Ok(AppState {
-            live_mouse_pos: Vec2::new(0.0, 0.0), // Initialize live mouse position
-            clicked_circles_positions: Vec::new(), // Start with an empty list of circles
-            circle_color: Color::from_rgb(100, 200, 255), // A nice light blue for the circles
-            circle_radius: 30.0,
+            live_mouse_pos: Vec2::new(0.0, 0.0),
+            clicked_circles_positions: Vec::new(),
+            circle_color: Color::from_rgb(
+                circle_config.color_r,
+                circle_config.color_g,
+                circle_config.color_b,
+            ),
+            circle_radius: circle_config.radius,
         })
     }
 }
 
-// Implementing the EventHandler trait for our AppState
+// --- EventHandler Implementation (mostly unchanged) ---
 impl EventHandler<ggez::GameError> for AppState {
-    // update() is called every frame before drawing.
     fn update(&mut self, _ctx: &mut Context) -> GameResult {
-        // Game logic can go here if needed for animations or other state changes.
         Ok(())
     }
 
-    // draw() is called every frame to render graphics.
     fn draw(&mut self, ctx: &mut Context) -> GameResult {
-        // 1. Clear the screen with a background color
         let mut canvas = graphics::Canvas::from_frame(ctx, graphics::Color::from_rgb(30, 30, 40));
 
-        // 2. Draw all stored circles
-        for &pos in &self.clicked_circles_positions { // Iterate over the stored positions
+        for &pos in &self.clicked_circles_positions {
             let circle_mesh = Mesh::new_circle(
                 ctx,
                 DrawMode::fill(),
-                pos, // Draw at the stored click position
-                self.circle_radius,
-                0.1, // Tolerance for circle smoothness
-                self.circle_color,
+                pos,
+                self.circle_radius, 
+                0.1,
+                self.circle_color, 
             )?;
             canvas.draw(&circle_mesh, graphics::DrawParam::default());
         }
 
-        // 3. Display live mouse coordinates as text
         let coords_text_string = format!(
             "Mouse: {:.0}, {:.0} | Circles: {}",
             self.live_mouse_pos.x,
             self.live_mouse_pos.y,
-            self.clicked_circles_positions.len() // Display number of circles
+            self.clicked_circles_positions.len()
         );
         let mut text_display = graphics::Text::new(coords_text_string);
-        text_display.set_scale(20.0); // Slightly smaller text to fit more info
+        text_display.set_scale(20.0);
 
         canvas.draw(
             &text_display,
@@ -74,13 +91,10 @@ impl EventHandler<ggez::GameError> for AppState {
                 .color(Color::WHITE),
         );
 
-        // 4. Present the canvas to the screen
         canvas.finish(ctx)?;
-
         Ok(())
     }
 
-    // Called when a mouse button is pressed
     fn mouse_button_down_event(
         &mut self,
         _ctx: &mut Context,
@@ -94,18 +108,11 @@ impl EventHandler<ggez::GameError> for AppState {
                 "Left mouse button pressed at: ({}, {}) - New circle added.",
                 click_pos.x, click_pos.y
             );
-            // Add the new click position to our list of circles
             self.clicked_circles_positions.push(click_pos);
         }
-        // You could add a way to clear circles, e.g., on right-click:
-        // if button == MouseButton::Right {
-        //     println!("Right mouse button pressed - Clearing circles.");
-        //     self.clicked_circles_positions.clear();
-        // }
         Ok(())
     }
 
-    // Called when a mouse button is released
     fn mouse_button_up_event(
         &mut self,
         _ctx: &mut Context,
@@ -114,13 +121,11 @@ impl EventHandler<ggez::GameError> for AppState {
         y: f32,
     ) -> GameResult {
         if button == MouseButton::Left {
-            // This event is less critical now for drawing, but good for logging or other actions
             println!("Left mouse button released at: ({}, {})", x, y);
         }
         Ok(())
     }
 
-    // Called when the mouse is moved
     fn mouse_motion_event(
         &mut self,
         _ctx: &mut Context,
@@ -129,23 +134,80 @@ impl EventHandler<ggez::GameError> for AppState {
         _dx: f32,
         _dy: f32,
     ) -> GameResult {
-        // Update the live mouse position for the text display
         self.live_mouse_pos = Vec2::new(x, y);
         Ok(())
     }
 }
 
-// The main function: entry point of the application
+// --- Configuration Loading Function ---
+fn load_config() -> AppConfig {
+    let default_config = AppConfig {
+        window: WindowConfig {
+            width: 800.0,
+            height: 600.0,
+            title: "Rust: Click to Add Circles (Default Config)".to_string(),
+        },
+        circle: CircleConfig {
+            radius: 30.0,
+            color_r: 100,
+            color_g: 200,
+            color_b: 255,
+        },
+    };
+
+    let config_path = "config.toml";
+
+    match fs::read_to_string(config_path) {
+        Ok(contents) => match toml::from_str(&contents) {
+            Ok(config) => {
+                println!("Successfully loaded configuration from {}", config_path);
+                config
+            }
+            Err(e) => {
+                eprintln!(
+                    "Failed to parse {}: {}. Using default configuration.",
+                    config_path, e
+                );
+                default_config
+            }
+        },
+        Err(_) => {
+            println!(
+                "{} not found. Using default configuration and creating a new one.",
+                config_path
+            );
+            // Attempt to create a default config.toml file
+            match toml::to_string_pretty(&default_config) { // This requires Serialize
+                Ok(toml_string) => {
+                    if let Err(e) = fs::write(config_path, toml_string) {
+                        eprintln!("Could not write default {}: {}", config_path, e);
+                    } else {
+                        println!("Default {} created.", config_path);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Could not serialize default config: {}", e);
+                }
+            }
+            default_config
+        }
+    }
+}
+
+// --- Main Function ---
 pub fn main() -> GameResult {
-    let (mut ctx, event_loop) = ContextBuilder::new("mouse_add_multiple_circles", "YourName")
-        .window_setup(WindowSetup::default().title(WINDOW_TITLE))
+    let config = load_config();
+
+    let (mut ctx, event_loop) = ContextBuilder::new("configurable_circles_app", "YourName")
+        .window_setup(WindowSetup::default().title(&config.window.title)) 
         .window_mode(
             WindowMode::default()
-                .dimensions(SCREEN_WIDTH, SCREEN_HEIGHT)
+                .dimensions(config.window.width, config.window.height) 
                 .resizable(true),
         )
         .build()?;
 
-    let app_state = AppState::new(&mut ctx)?;
+    let app_state = AppState::new(&mut ctx, &config.circle)?; 
+
     event::run(ctx, event_loop, app_state)
 }
