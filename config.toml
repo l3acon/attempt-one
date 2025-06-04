@@ -3,7 +3,8 @@
 [window]
 width = 1024.0
 height = 768.0
-title = "My Configured Shapes App!"
+title = "vrun"
+msaa_level = 4 # Optional: Anti-aliasing samples. Use 1 (off) or 4 (on). Defaults to 4 if omitted or invalid.
 
 [shape]
 width = 120.0
@@ -15,8 +16,8 @@ color_b = 180
 
 # Optional: Customize the selection outline
 # If these are omitted, the application uses internal defaults (Yellow, 2.0 width)
-selection_outline_color_r = 0     # Example: Green R
-selection_outline_color_g = 255   # Example: Green G
-selection_outline_color_b = 0     # Example: Green B
+selection_outline_color_r = 150     # Example: Green R
+selection_outline_color_g = 140   # Example: Green G
+selection_outline_color_b = 140     # Example: Green B
 selection_outline_width = 3.0     # Example: Thicker outline
 

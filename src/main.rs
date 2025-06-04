@@ -1,8 +1,8 @@
 // main.rs
 
-use ggez::conf::{WindowMode, WindowSetup};
+use ggez::conf::{WindowMode, WindowSetup, NumSamples};
 use ggez::event::{self, EventHandler, MouseButton};
-use ggez::glam::Vec2; // For 2D vectors (coordinates)
+use ggez::glam::Vec2;
 use ggez::graphics::{self, Color, DrawMode, Mesh, Rect, Text, TextLayout};
 use ggez::input::keyboard::{KeyCode, KeyInput};
 use ggez::{Context, ContextBuilder, GameResult};
@@ -16,6 +16,7 @@ struct WindowConfig {
     width: f32,
     height: f32,
     title: String,
+    msaa_level: Option<u8>, // Optional: 1 (off) or 4 (on). Defaults to 4 if not present or invalid.
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -26,7 +27,6 @@ struct ShapeConfig {
     color_r: u8,
     color_g: u8,
     color_b: u8,
-    // Optional selection outline properties
     selection_outline_color_r: Option<u8>,
     selection_outline_color_g: Option<u8>,
     selection_outline_color_b: Option<u8>,
@@ -55,37 +55,28 @@ struct ShapeData {
 struct AppState {
     live_mouse_pos: Vec2,
     clicked_shapes: Vec<ShapeData>,
-
     default_shape_color: Color,
     default_shape_width: f32,
     default_shape_height: f32,
     default_shape_corner_radius: f32,
-
-    // Selection outline properties (loaded from config or defaulted)
     selection_outline_color: Color,
     selection_outline_width: f32,
-
     last_click_time: Option<Instant>,
     last_click_pos: Option<Vec2>,
-
     selected_shape_index: Option<usize>,
     dragged_shape_index: Option<usize>,
     drag_offset: Option<Vec2>,
-
     editing_shape_index: Option<usize>,
     current_input_text: String,
 }
 
 impl AppState {
     fn new(_ctx: &mut Context, shape_config: &ShapeConfig) -> GameResult<AppState> {
-        // Determine selection outline color
-        let sel_color_r = shape_config.selection_outline_color_r.unwrap_or(255); // Default Yellow R
-        let sel_color_g = shape_config.selection_outline_color_g.unwrap_or(255); // Default Yellow G
-        let sel_color_b = shape_config.selection_outline_color_b.unwrap_or(0);   // Default Yellow B
+        let sel_color_r = shape_config.selection_outline_color_r.unwrap_or(255);
+        let sel_color_g = shape_config.selection_outline_color_g.unwrap_or(255);
+        let sel_color_b = shape_config.selection_outline_color_b.unwrap_or(0);
         let selection_outline_color = Color::from_rgb(sel_color_r, sel_color_g, sel_color_b);
-
-        // Determine selection outline width
-        let selection_outline_width = shape_config.selection_outline_width.unwrap_or(2.0); // Default width 2.0
+        let selection_outline_width = shape_config.selection_outline_width.unwrap_or(2.0);
 
         Ok(AppState {
             live_mouse_pos: Vec2::new(0.0, 0.0),
@@ -98,8 +89,8 @@ impl AppState {
             default_shape_width: shape_config.width,
             default_shape_height: shape_config.height,
             default_shape_corner_radius: shape_config.corner_radius,
-            selection_outline_color, // Use determined color
-            selection_outline_width, // Use determined width
+            selection_outline_color,
+            selection_outline_width,
             last_click_time: None,
             last_click_pos: None,
             selected_shape_index: None,
@@ -127,9 +118,7 @@ impl EventHandler<ggez::GameError> for AppState {
                 self.default_shape_width,
                 self.default_shape_height,
             );
-
             let shape_color_to_draw = self.default_shape_color;
-
             let rounded_rect_mesh = Mesh::new_rounded_rectangle(
                 ctx,
                 DrawMode::fill(),
@@ -144,20 +133,18 @@ impl EventHandler<ggez::GameError> for AppState {
                 let center_y = rect.y + rect.h / 2.0;
                 let outline_w = rect.w * 1.05;
                 let outline_h = rect.h * 1.05;
-
                 let outline_bounds = Rect::new(
                     center_x - outline_w / 2.0,
                     center_y - outline_h / 2.0,
                     outline_w,
                     outline_h,
                 );
-
                 let outline_rect_mesh = Mesh::new_rounded_rectangle(
                     ctx,
-                    DrawMode::stroke(self.selection_outline_width), // Use configured width
+                    DrawMode::stroke(self.selection_outline_width),
                     outline_bounds,
                     self.default_shape_corner_radius * 1.05,
-                    self.selection_outline_color, // Use configured color
+                    self.selection_outline_color,
                 )?;
                 canvas.draw(&outline_rect_mesh, graphics::DrawParam::default());
             }
@@ -190,22 +177,14 @@ impl EventHandler<ggez::GameError> for AppState {
         let mut text_display = graphics::Text::new(status_text);
         text_display.set_scale(20.0);
         canvas.draw(&text_display, graphics::DrawParam::default().dest(Vec2::new(10.0, 10.0)).color(Color::WHITE));
-
         canvas.finish(ctx)?;
         Ok(())
     }
 
-    fn mouse_button_down_event(
-        &mut self,
-        _ctx: &mut Context,
-        button: MouseButton,
-        x: f32,
-        y: f32,
-    ) -> GameResult {
+    fn mouse_button_down_event(&mut self, _ctx: &mut Context, button: MouseButton, x: f32, y: f32) -> GameResult {
         if button == MouseButton::Left {
             let current_click_time = Instant::now();
             let current_click_pos = Vec2::new(x, y);
-            
             let mut clicked_on_shape_details: Option<(usize, Vec2)> = None;
 
             for (index, shape_data) in self.clicked_shapes.iter().enumerate().rev() {
@@ -226,66 +205,49 @@ impl EventHandler<ggez::GameError> for AppState {
                     if let Some(editing_idx_val) = self.editing_shape_index.take() {
                         self.clicked_shapes[editing_idx_val].text = if self.current_input_text.is_empty() { None } else { Some(self.current_input_text.clone()) };
                         self.current_input_text.clear();
-                        println!("Finalized text for shape {} due to click on another shape.", editing_idx_val);
                     }
                 }
-                
                 self.selected_shape_index = Some(clicked_idx);
-
                 let mut is_double_click_for_edit = false;
                 if let (Some(last_time), Some(last_pos)) = (self.last_click_time, self.last_click_pos) {
-                    let duration = current_click_time.duration_since(last_time).as_millis();
-                    let distance = current_click_pos.distance(last_pos);
-                    if duration <= DOUBLE_CLICK_MAX_DELAY_MS && distance <= DOUBLE_CLICK_MAX_DISTANCE {
+                    if current_click_time.duration_since(last_time).as_millis() <= DOUBLE_CLICK_MAX_DELAY_MS && current_click_pos.distance(last_pos) <= DOUBLE_CLICK_MAX_DISTANCE {
                         is_double_click_for_edit = true;
                     }
                 }
-
                 if is_double_click_for_edit {
-                    println!("Double-click on shape {}: starting text edit.", clicked_idx);
                     self.editing_shape_index = Some(clicked_idx);
                     self.current_input_text = self.clicked_shapes[clicked_idx].text.clone().unwrap_or_default();
-                    self.dragged_shape_index = None; 
-                    self.last_click_time = None; 
+                    self.dragged_shape_index = None;
+                    self.last_click_time = None;
                     self.last_click_pos = None;
                 } else {
-                    println!("Single-click on shape {}: selected. Starting drag.", clicked_idx);
                     self.dragged_shape_index = Some(clicked_idx);
                     self.drag_offset = Some(clicked_shape_center - current_click_pos);
                     self.last_click_time = Some(current_click_time);
                     self.last_click_pos = Some(current_click_pos);
                 }
-
             } else {
                 if let Some(editing_idx_val) = self.editing_shape_index.take() {
                     self.clicked_shapes[editing_idx_val].text = if self.current_input_text.is_empty() { None } else { Some(self.current_input_text.clone()) };
                     self.current_input_text.clear();
-                    println!("Clicked empty space: finalized text for shape {}.", editing_idx_val);
                 }
-                
-                self.selected_shape_index = None; 
+                self.selected_shape_index = None;
                 self.dragged_shape_index = None;
-
                 let mut is_double_click_for_create = false;
                 if let (Some(last_time), Some(last_pos)) = (self.last_click_time, self.last_click_pos) {
-                    let duration = current_click_time.duration_since(last_time).as_millis();
-                    let distance = current_click_pos.distance(last_pos);
-                    if duration <= DOUBLE_CLICK_MAX_DELAY_MS && distance <= DOUBLE_CLICK_MAX_DISTANCE {
+                    if current_click_time.duration_since(last_time).as_millis() <= DOUBLE_CLICK_MAX_DELAY_MS && current_click_pos.distance(last_pos) <= DOUBLE_CLICK_MAX_DISTANCE {
                         is_double_click_for_create = true;
                     }
                 }
-
                 if is_double_click_for_create {
-                    println!("Double-click on empty space: New shape added & now editing.");
                     self.clicked_shapes.push(ShapeData { center_position: current_click_pos, text: None });
                     let new_idx = self.clicked_shapes.len() - 1;
-                    self.selected_shape_index = Some(new_idx); 
-                    self.editing_shape_index = Some(new_idx); 
+                    self.selected_shape_index = Some(new_idx);
+                    self.editing_shape_index = Some(new_idx);
                     self.current_input_text.clear();
-                    self.last_click_time = None; 
+                    self.last_click_time = None;
                     self.last_click_pos = None;
                 } else {
-                    println!("Single click on empty space.");
                     self.last_click_time = Some(current_click_time);
                     self.last_click_pos = Some(current_click_pos);
                 }
@@ -295,12 +257,9 @@ impl EventHandler<ggez::GameError> for AppState {
     }
 
     fn mouse_button_up_event(&mut self, _ctx: &mut Context, button: MouseButton, _x: f32, _y: f32) -> GameResult {
-        if button == MouseButton::Left {
-            if self.dragged_shape_index.is_some() {
-                println!("Dropped shape {}", self.dragged_shape_index.unwrap());
-                self.dragged_shape_index = None;
-                self.drag_offset = None;
-            }
+        if button == MouseButton::Left && self.dragged_shape_index.is_some() {
+            self.dragged_shape_index = None;
+            self.drag_offset = None;
         }
         Ok(())
     }
@@ -309,9 +268,8 @@ impl EventHandler<ggez::GameError> for AppState {
         self.live_mouse_pos = Vec2::new(x, y);
         if let Some(index) = self.dragged_shape_index {
             if let Some(offset) = self.drag_offset {
-                let new_center = self.live_mouse_pos + offset;
                 if index < self.clicked_shapes.len() {
-                    self.clicked_shapes[index].center_position = new_center;
+                    self.clicked_shapes[index].center_position = self.live_mouse_pos + offset;
                 }
             }
         }
@@ -334,39 +292,26 @@ impl EventHandler<ggez::GameError> for AppState {
                         if let Some(index) = self.editing_shape_index.take() {
                             self.clicked_shapes[index].text = if self.current_input_text.is_empty() { None } else { Some(self.current_input_text.clone()) };
                             self.current_input_text.clear();
-                            println!("Text editing finished for shape {}.", index);
-                            self.selected_shape_index = Some(index); 
+                            self.selected_shape_index = Some(index);
                         }
                     }
                     KeyCode::Escape => {
                         if repeated { return Ok(()); }
                         self.editing_shape_index = None;
                         self.current_input_text.clear();
-                        println!("Text editing cancelled.");
                     }
-                    KeyCode::Back => { 
-                        self.current_input_text.pop();
-                    }
-                    KeyCode::Delete => {
-                        println!("Delete pressed during text edit - no action on shape.");
-                    }
+                    KeyCode::Back => { self.current_input_text.pop(); }
+                    KeyCode::Delete => {} // No action on shape delete while editing text
                     _ => { if repeated { return Ok(()); } }
                 }
-            } else {
-                if let Some(index_to_delete) = self.selected_shape_index {
-                    if keycode == KeyCode::Delete {
-                        if repeated { return Ok(()); } 
-                        
-                        println!("Delete key pressed for selected shape index {}", index_to_delete);
-                        self.clicked_shapes.remove(index_to_delete);
-                        
-                        self.selected_shape_index = None;
-                        self.dragged_shape_index = None; 
-                        self.editing_shape_index = None; 
-                        self.last_click_time = None; 
-                        self.last_click_pos = None;
-                        println!("Shape deleted.");
-                    }
+            } else if let Some(index_to_delete) = self.selected_shape_index {
+                if keycode == KeyCode::Delete && !repeated {
+                    self.clicked_shapes.remove(index_to_delete);
+                    self.selected_shape_index = None;
+                    self.dragged_shape_index = None;
+                    self.editing_shape_index = None;
+                    self.last_click_time = None;
+                    self.last_click_pos = None;
                 }
             }
         }
@@ -379,7 +324,8 @@ fn load_config() -> AppConfig {
         window: WindowConfig {
             width: 800.0,
             height: 600.0,
-            title: "Rust: Shapes - Configurable Selection (Default)".to_string(),
+            title: "Rust: Shapes - Configurable AA (Default)".to_string(),
+            msaa_level: None, // Will default to 4 in main() if not specified in config
         },
         shape: ShapeConfig {
             width: 120.0,
@@ -388,8 +334,6 @@ fn load_config() -> AppConfig {
             color_r: 100,
             color_g: 200,
             color_b: 255,
-            // Default config written to file will not include these,
-            // demonstrating they are optional. AppState::new will use hardcoded defaults.
             selection_outline_color_r: None,
             selection_outline_color_g: None,
             selection_outline_color_b: None,
@@ -428,15 +372,37 @@ fn load_config() -> AppConfig {
 
 pub fn main() -> GameResult {
     let config = load_config();
-    let (mut ctx, event_loop) = ContextBuilder::new("shapes_app_configurable_selection", "YourName")
-        .window_setup(WindowSetup::default().title(&config.window.title))
+
+    // Determine MSAA level from config or default to 4
+    let msaa = match config.window.msaa_level {
+        Some(1) => NumSamples::One, // 1x MSAA (effectively off)
+        // NumSamples::Two, Eight, Sixteen might not be available in ggez 0.9.0-rc2
+        // Default to Four for any other specified number or if not specified.
+        Some(4) => NumSamples::Four,
+        Some(other) => {
+            println!(
+                "Warning: Invalid msaa_level '{}' in config.toml. Valid options are 1 or 4. Defaulting to 4.",
+                other
+            );
+            NumSamples::Four
+        }
+        None => NumSamples::Four, // Default if msaa_level is not in config.toml
+    };
+    println!("Using MSAA level: {:?}", msaa);
+
+
+    let (mut ctx, event_loop) = ContextBuilder::new("shapes_app_configurable_aa", "YourName")
+        .window_setup(
+            WindowSetup::default()
+                .title(&config.window.title)
+                .samples(msaa) // Use determined MSAA level
+        )
         .window_mode(
             WindowMode::default()
                 .dimensions(config.window.width, config.window.height)
-                .resizable(true),
+                .resizable(true)
         )
         .build()?;
     let app_state = AppState::new(&mut ctx, &config.shape)?;
     event::run(ctx, event_loop, app_state)
 }
-
