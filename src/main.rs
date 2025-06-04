@@ -41,8 +41,10 @@ struct AppState {
     clicked_circles_positions: Vec<Vec2>,
     circle_color: Color,
     circle_radius: f32,
-    last_click_time: Option<Instant>, // Time of the last click
-    last_click_pos: Option<Vec2>,   // Position of the last click
+    last_click_time: Option<Instant>, // Time of the last click (for double-click detection)
+    last_click_pos: Option<Vec2>,   // Position of the last click (for double-click detection)
+    dragged_circle_index: Option<usize>, // Index of the circle currently being dragged
+    drag_offset: Option<Vec2>,          // Offset from mouse to circle's center during drag
 }
 
 impl AppState {
@@ -58,6 +60,8 @@ impl AppState {
             circle_radius: circle_config.radius,
             last_click_time: None,
             last_click_pos: None,
+            dragged_circle_index: None, // Initialize new field
+            drag_offset: None,          // Initialize new field
         })
     }
 }
@@ -113,36 +117,57 @@ impl EventHandler<ggez::GameError> for AppState {
         if button == MouseButton::Left {
             let current_click_time = Instant::now();
             let current_click_pos = Vec2::new(x, y);
+            let mut clicked_on_circle_to_drag = false;
 
-            if let (Some(last_time), Some(last_pos)) = (self.last_click_time, self.last_click_pos) {
-                let duration_since_last = current_click_time.duration_since(last_time).as_millis();
-                let distance_from_last = current_click_pos.distance(last_pos);
+            // 1. Check if we clicked on an existing circle to start a drag.
+            // Iterate in reverse order of drawing to pick the "topmost" circle if they overlap.
+            for (index, &circle_center) in self.clicked_circles_positions.iter().enumerate().rev() {
+                if current_click_pos.distance(circle_center) <= self.circle_radius {
+                    self.dragged_circle_index = Some(index);
+                    // Store the offset from the mouse click point to the circle's actual center.
+                    self.drag_offset = Some(circle_center - current_click_pos);
+                    clicked_on_circle_to_drag = true;
+                    println!("Starting drag for circle at index {}", index);
 
-                if duration_since_last <= DOUBLE_CLICK_MAX_DELAY_MS
-                    && distance_from_last <= DOUBLE_CLICK_MAX_DISTANCE
-                {
-                    // This is a double click!
-                    println!(
-                        "Double click at: ({}, {}) - New circle added.",
-                        current_click_pos.x, current_click_pos.y
-                    );
-                    self.clicked_circles_positions.push(current_click_pos);
-
-                    // Reset last click info to prevent the second click of this double-click
-                    // from becoming the first click of a new potential double-click.
+                    // If we start dragging, this click should not count towards a double-click
+                    // for creating a new circle. Reset double-click tracking.
                     self.last_click_time = None;
                     self.last_click_pos = None;
+                    break; // Found a circle to drag, no need to check others.
+                }
+            }
+
+            // 2. If not dragging an existing circle, handle potential double-click for creation.
+            if !clicked_on_circle_to_drag {
+                if let (Some(last_time), Some(last_pos)) = (self.last_click_time, self.last_click_pos) {
+                    let duration_since_last = current_click_time.duration_since(last_time).as_millis();
+                    let distance_from_last = current_click_pos.distance(last_pos);
+
+                    if duration_since_last <= DOUBLE_CLICK_MAX_DELAY_MS
+                        && distance_from_last <= DOUBLE_CLICK_MAX_DISTANCE
+                    {
+                        // This is a double click on empty space!
+                        println!(
+                            "Double click on empty space at: ({}, {}) - New circle added.",
+                            current_click_pos.x, current_click_pos.y
+                        );
+                        self.clicked_circles_positions.push(current_click_pos);
+
+                        // Reset last click info after a successful double click.
+                        self.last_click_time = None;
+                        self.last_click_pos = None;
+                    } else {
+                        // Not a double click (too slow or too far), treat as a new first click.
+                        self.last_click_time = Some(current_click_time);
+                        self.last_click_pos = Some(current_click_pos);
+                        println!("Single click on empty space at: ({}, {}) (potential first of double)", x, y);
+                    }
                 } else {
-                    // Not a double click (too slow or too far), treat as a new first click.
+                    // This is the first click (or first after a successful double click/drag).
                     self.last_click_time = Some(current_click_time);
                     self.last_click_pos = Some(current_click_pos);
-                    println!("Single click at: ({}, {}) (potential first of double)", x, y);
+                    println!("Single click on empty space at: ({}, {}) (potential first of double)", x, y);
                 }
-            } else {
-                // This is the first click (or first after a successful double click).
-                self.last_click_time = Some(current_click_time);
-                self.last_click_pos = Some(current_click_pos);
-                println!("Single click at: ({}, {}) (potential first of double)", x, y);
             }
         }
         Ok(())
@@ -152,12 +177,17 @@ impl EventHandler<ggez::GameError> for AppState {
         &mut self,
         _ctx: &mut Context,
         button: MouseButton,
-        x: f32,
-        y: f32,
+        _x: f32, // x and y of mouse_up are not strictly needed for this logic
+        _y: f32,
     ) -> GameResult {
         if button == MouseButton::Left {
-            // This event is less critical for the double-click logic itself,
-            // but can be used for logging or other actions.
+            // If a circle was being dragged, "drop" it.
+            if self.dragged_circle_index.is_some() {
+                println!("Dropped circle at: ({:.0}, {:.0})", self.live_mouse_pos.x, self.live_mouse_pos.y);
+                self.dragged_circle_index = None;
+                self.drag_offset = None;
+            }
+            // Optional: Log mouse release if needed for other purposes.
             // println!("Left mouse button released at: ({}, {})", x, y);
         }
         Ok(())
@@ -171,7 +201,19 @@ impl EventHandler<ggez::GameError> for AppState {
         _dx: f32,
         _dy: f32,
     ) -> GameResult {
-        self.live_mouse_pos = Vec2::new(x, y);
+        self.live_mouse_pos = Vec2::new(x, y); // Always update live mouse position.
+
+        // If a circle is being dragged, update its position.
+        if let Some(index) = self.dragged_circle_index {
+            if let Some(offset) = self.drag_offset {
+                // Calculate new center based on current mouse position and the stored offset.
+                let new_center = self.live_mouse_pos + offset;
+                // Ensure the index is still valid (it should be, but good practice).
+                if index < self.clicked_circles_positions.len() {
+                    self.clicked_circles_positions[index] = new_center;
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -182,7 +224,7 @@ fn load_config() -> AppConfig {
         window: WindowConfig {
             width: 800.0,
             height: 600.0,
-            title: "Rust: Double Click to Add Circles (Default Config)".to_string(),
+            title: "Rust: Drag & Double Click Circles (Default Config)".to_string(),
         },
         circle: CircleConfig {
             radius: 30.0,
@@ -234,7 +276,7 @@ fn load_config() -> AppConfig {
 pub fn main() -> GameResult {
     let config = load_config();
 
-    let (mut ctx, event_loop) = ContextBuilder::new("configurable_circles_app_double_click", "YourName")
+    let (mut ctx, event_loop) = ContextBuilder::new("configurable_circles_app_drag_double_click", "YourName")
         .window_setup(WindowSetup::default().title(&config.window.title))
         .window_mode(
             WindowMode::default()
