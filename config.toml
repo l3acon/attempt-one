@@ -1,7 +1,7 @@
 # Configuration for the Rust GGEZ Circles App
 
 [window]
-width = 2048.0
+width = 1530.0
 height = 1024.0
 title = "My Configured Circles App!"
 
