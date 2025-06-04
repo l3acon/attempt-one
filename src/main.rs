@@ -43,6 +43,8 @@ struct AppConfig {
 const DOUBLE_CLICK_MAX_DELAY_MS: u128 = 500;
 const DOUBLE_CLICK_MAX_DISTANCE: f32 = 10.0;
 const TEXT_PADDING: f32 = 8.0;
+const CONNECTOR_LINE_WIDTH: f32 = 2.0;
+const CONNECTOR_LINE_COLOR: Color = Color::WHITE;
 
 // --- Data structure for individual shapes ---
 #[derive(Clone, Debug)]
@@ -111,6 +113,35 @@ impl EventHandler<ggez::GameError> for AppState {
     fn draw(&mut self, ctx: &mut Context) -> GameResult {
         let mut canvas = graphics::Canvas::from_frame(ctx, graphics::Color::from_rgb(30, 30, 40));
 
+        // --- Draw Connector Lines ---
+        // Only draw lines if there are at least two shapes
+        if self.clicked_shapes.len() > 1 {
+            for i in 0..(self.clicked_shapes.len() - 1) {
+                let shape1_data = &self.clicked_shapes[i];
+                let shape2_data = &self.clicked_shapes[i + 1];
+
+                // Calculate bottom-left of shape1
+                let start_x = shape1_data.center_position.x - self.default_shape_width / 2.0;
+                let start_y = shape1_data.center_position.y + self.default_shape_height / 2.0;
+                let start_point = Vec2::new(start_x, start_y);
+
+                // Calculate top-left of shape2
+                let end_x = shape2_data.center_position.x - self.default_shape_width / 2.0;
+                let end_y = shape2_data.center_position.y - self.default_shape_height / 2.0;
+                let end_point = Vec2::new(end_x, end_y);
+
+                // Create and draw the line
+                let line_mesh = Mesh::new_line(
+                    ctx,
+                    &[start_point, end_point],
+                    CONNECTOR_LINE_WIDTH,
+                    CONNECTOR_LINE_COLOR,
+                )?;
+                canvas.draw(&line_mesh, graphics::DrawParam::default());
+            }
+        }
+
+        // --- Draw Shapes, Outlines, and Text ---
         for (index, shape_data) in self.clicked_shapes.iter().enumerate() {
             let rect = Rect::new(
                 shape_data.center_position.x - self.default_shape_width / 2.0,
@@ -324,8 +355,8 @@ fn load_config() -> AppConfig {
         window: WindowConfig {
             width: 800.0,
             height: 600.0,
-            title: "Rust: Shapes - Configurable AA (Default)".to_string(),
-            msaa_level: None, // Will default to 4 in main() if not specified in config
+            title: "Rust: Shapes - Connecting Lines (Default)".to_string(), // Updated title
+            msaa_level: None, 
         },
         shape: ShapeConfig {
             width: 120.0,
@@ -373,11 +404,8 @@ fn load_config() -> AppConfig {
 pub fn main() -> GameResult {
     let config = load_config();
 
-    // Determine MSAA level from config or default to 4
     let msaa = match config.window.msaa_level {
-        Some(1) => NumSamples::One, // 1x MSAA (effectively off)
-        // NumSamples::Two, Eight, Sixteen might not be available in ggez 0.9.0-rc2
-        // Default to Four for any other specified number or if not specified.
+        Some(1) => NumSamples::One, 
         Some(4) => NumSamples::Four,
         Some(other) => {
             println!(
@@ -386,16 +414,16 @@ pub fn main() -> GameResult {
             );
             NumSamples::Four
         }
-        None => NumSamples::Four, // Default if msaa_level is not in config.toml
+        None => NumSamples::Four, 
     };
     println!("Using MSAA level: {:?}", msaa);
 
 
-    let (mut ctx, event_loop) = ContextBuilder::new("shapes_app_configurable_aa", "YourName")
+    let (mut ctx, event_loop) = ContextBuilder::new("shapes_app_connecting_lines", "YourName") // Updated app name
         .window_setup(
             WindowSetup::default()
                 .title(&config.window.title)
-                .samples(msaa) // Use determined MSAA level
+                .samples(msaa) 
         )
         .window_mode(
             WindowMode::default()
@@ -406,3 +434,4 @@ pub fn main() -> GameResult {
     let app_state = AppState::new(&mut ctx, &config.shape)?;
     event::run(ctx, event_loop, app_state)
 }
+
