@@ -4,9 +4,11 @@ name = "rust_visual_mouse_app"
 version = "0.1.0"
 edition = "2021"
 
-# See more keys and their definitions at [https://doc.rust-lang.org/cargo/reference/manifest.html](https://doc.rust-lang.org/cargo/reference/manifest.html)
-
 [dependencies]
-ggez = "0.9.0-rc2" # Or the latest stable version if 0.9.0 is fully released
-serde = { version = "1.0", features = ["derive"] } # For serialization/deserialization
-toml = "0.8" # For TOML parsing (check for the latest version)
+ggez = "0.9.0-rc2" 
+serde = { version = "1.0", features = ["derive"] } 
+toml = "0.8" 
+lyon_path = "1.0" # Or a version compatible with ggez 0.9.x, often 0.17.x
+lyon_tessellation = "1.0" # Or a version compatible with ggez 0.9.x, often 0.17.x
+
+

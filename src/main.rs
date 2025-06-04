@@ -3,12 +3,21 @@
 use ggez::conf::{WindowMode, WindowSetup, NumSamples};
 use ggez::event::{self, EventHandler, MouseButton};
 use ggez::glam::Vec2;
-use ggez::graphics::{self, Color, DrawMode, Mesh, Rect, Text, TextLayout};
+use ggez::graphics::{self, Color, DrawMode, Mesh, MeshData, Rect, Text, TextLayout, Vertex}; // Added MeshData
 use ggez::input::keyboard::{KeyCode, KeyInput};
 use ggez::{Context, ContextBuilder, GameResult};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::time::Instant;
+
+// Lyon imports
+use lyon_path::path::Builder as LyonPathBuilder;
+use lyon_path::math::Point as LyonPoint;
+use lyon_tessellation::{
+    StrokeTessellator, StrokeOptions, StrokeVertex, VertexBuffers,
+    BuffersBuilder
+};
+
 
 // --- Configuration Structs ---
 #[derive(Deserialize, Serialize, Debug)]
@@ -16,7 +25,7 @@ struct WindowConfig {
     width: f32,
     height: f32,
     title: String,
-    msaa_level: Option<u8>, // Optional: 1 (off) or 4 (on). Defaults to 4 if not present or invalid.
+    msaa_level: Option<u8>, 
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -45,6 +54,7 @@ const DOUBLE_CLICK_MAX_DISTANCE: f32 = 10.0;
 const TEXT_PADDING: f32 = 8.0;
 const CONNECTOR_LINE_WIDTH: f32 = 2.0;
 const CONNECTOR_LINE_COLOR: Color = Color::WHITE;
+const CONNECTOR_CURVE_OFFSET: f32 = 40.0; 
 
 // --- Data structure for individual shapes ---
 #[derive(Clone, Debug)]
@@ -114,30 +124,66 @@ impl EventHandler<ggez::GameError> for AppState {
         let mut canvas = graphics::Canvas::from_frame(ctx, graphics::Color::from_rgb(30, 30, 40));
 
         // --- Draw Connector Lines ---
-        // Only draw lines if there are at least two shapes
         if self.clicked_shapes.len() > 1 {
             for i in 0..(self.clicked_shapes.len() - 1) {
                 let shape1_data = &self.clicked_shapes[i];
                 let shape2_data = &self.clicked_shapes[i + 1];
 
-                // Calculate bottom-left of shape1
                 let start_x = shape1_data.center_position.x - self.default_shape_width / 2.0;
                 let start_y = shape1_data.center_position.y + self.default_shape_height / 2.0;
-                let start_point = Vec2::new(start_x, start_y);
+                let start_point = LyonPoint::new(start_x, start_y); 
 
-                // Calculate top-left of shape2
                 let end_x = shape2_data.center_position.x - self.default_shape_width / 2.0;
                 let end_y = shape2_data.center_position.y - self.default_shape_height / 2.0;
-                let end_point = Vec2::new(end_x, end_y);
+                let end_point = LyonPoint::new(end_x, end_y); 
 
-                // Create and draw the line
-                let line_mesh = Mesh::new_line(
-                    ctx,
-                    &[start_point, end_point],
-                    CONNECTOR_LINE_WIDTH,
-                    CONNECTOR_LINE_COLOR,
-                )?;
-                canvas.draw(&line_mesh, graphics::DrawParam::default());
+                let direction_multiplier = if end_point.x > start_point.x { 1.0 } else { -1.0 };
+                let cp1 = LyonPoint::new(start_point.x + CONNECTOR_CURVE_OFFSET * direction_multiplier, start_point.y);
+                let cp2 = LyonPoint::new(end_point.x - CONNECTOR_CURVE_OFFSET * direction_multiplier, end_point.y);
+
+                let mut path_builder = LyonPathBuilder::new();
+                path_builder.begin(start_point);
+                path_builder.cubic_bezier_to(cp1, cp2, end_point);
+                path_builder.end(false); 
+                let lyon_path = path_builder.build();
+
+                let mut geometry: VertexBuffers<Vertex, u32> = VertexBuffers::new();
+                let mut stroke_tess = StrokeTessellator::new();
+                let stroke_options = StrokeOptions::default().with_line_width(CONNECTOR_LINE_WIDTH);
+                let line_color_arr = [
+                    CONNECTOR_LINE_COLOR.r,
+                    CONNECTOR_LINE_COLOR.g,
+                    CONNECTOR_LINE_COLOR.b,
+                    CONNECTOR_LINE_COLOR.a,
+                ];
+
+                stroke_tess.tessellate_path(
+                    &lyon_path,
+                    &stroke_options,
+                    &mut BuffersBuilder::new(&mut geometry, |vertex: StrokeVertex| {
+                        Vertex {
+                            position: [vertex.position().x, vertex.position().y],
+                            uv: [0.0, 0.0], 
+                            color: line_color_arr,
+                        }
+                    }),
+                ).unwrap_or_else(|e| {println!("Lyon tessellation error: {:?}", e);});
+
+
+                if !geometry.vertices.is_empty() && !geometry.indices.is_empty() {
+                    // Create MeshData, providing slices if that's what the compiler expects
+                    // for the MeshData struct being used by Mesh::from_data in this context.
+                    // This assumes MeshData might be defined with lifetimes and expect slices,
+                    // or Mesh::from_data has specific requirements leading to this error.
+                    let mesh_data = MeshData {
+                        vertices: &geometry.vertices, // Pass a slice
+                        indices: &geometry.indices,   // Pass a slice
+                    };
+                    
+                    let line_mesh = Mesh::from_data(ctx, mesh_data); 
+
+                    canvas.draw(&line_mesh, graphics::DrawParam::default());
+                }
             }
         }
 
@@ -332,7 +378,7 @@ impl EventHandler<ggez::GameError> for AppState {
                         self.current_input_text.clear();
                     }
                     KeyCode::Back => { self.current_input_text.pop(); }
-                    KeyCode::Delete => {} // No action on shape delete while editing text
+                    KeyCode::Delete => {} 
                     _ => { if repeated { return Ok(()); } }
                 }
             } else if let Some(index_to_delete) = self.selected_shape_index {
@@ -355,7 +401,7 @@ fn load_config() -> AppConfig {
         window: WindowConfig {
             width: 800.0,
             height: 600.0,
-            title: "Rust: Shapes - Connecting Lines (Default)".to_string(), // Updated title
+            title: "Rust: Shapes - Lyon Curves (Default)".to_string(),
             msaa_level: None, 
         },
         shape: ShapeConfig {
@@ -419,7 +465,7 @@ pub fn main() -> GameResult {
     println!("Using MSAA level: {:?}", msaa);
 
 
-    let (mut ctx, event_loop) = ContextBuilder::new("shapes_app_connecting_lines", "YourName") // Updated app name
+    let (mut ctx, event_loop) = ContextBuilder::new("shapes_app_lyon_curves", "YourName")
         .window_setup(
             WindowSetup::default()
                 .title(&config.window.title)
