@@ -1,24 +1,29 @@
-# Configuration for the Rust GGEZ Shapes App
+# Example Configuration for the Rust GGEZ Shapes App
 
 [window]
-width = 1024.0
-height = 768.0
-title = "vrun"
+width = 1280.0
+height = 720.0
+title = "My Awesome Shapes App - Configured!"
 msaa_level = 4 # Optional: Anti-aliasing samples. Use 1 (off) or 4 (on). Defaults to 4 if omitted or invalid.
-ui_scale_factor = 2.0 # Optional: Make UI elements appear larger, use for high dpi screens like Apple Retna
+ui_scale_factor = 2.0 # Optional: Makes UI elements appear 1.5x as large. Defaults to 1.0.
 
 [shape]
-width = 120.0
-height = 70.0
-corner_radius = 15.0
-color_r = 255
-color_g = 105
-color_b = 180
+width = 150.0 # Default width for new shapes
+height = 80.0 # Default height for new shapes
+corner_radius = 20.0 # Default corner radius for new shapes
+base_color_rgb = [80, 150, 220] # Example: A pleasant blue for shapes
 
-# Optional: Customize the selection outline
-# If these are omitted, the application uses internal defaults (Yellow, 2.0 width)
-selection_outline_color_r = 150     # Example: Green R
-selection_outline_color_g = 140   # Example: Green G
-selection_outline_color_b = 140     # Example: Green B
-selection_outline_width = 3.0     # Example: Thicker outline
+# Optional: Customize the selection outline for shapes
+selection_outline_color_rgb = [255, 255, 50] # Example: Bright Yellow
+selection_outline_width = 2.5
+
+# Optional: Customize various UI colors for connectors and ports. All are RGB [r, g, b] arrays.
+# Alpha for preview_connector_line is hardcoded in the application to ~0.7.
+[colors]
+connector_line_rgb = [240, 240, 240]            # Example: Off-white for connector lines
+selected_connector_line_rgb = [0, 220, 220]     # Example: Bright Teal for selected connector lines
+preview_connector_line_rgb = [150, 150, 150]    # Example: Medium Gray for preview line (alpha hardcoded)
+default_port_rgb = [220, 220, 220]              # Example: Light Gray for default ports
+selected_connector_port_rgb = [0, 200, 200]     # Example: Teal for ports of a selected connector
+active_new_line_start_port_rgb = [100, 255, 100] # Example: Bright Green for active new line port
 

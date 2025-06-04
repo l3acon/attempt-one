@@ -20,6 +20,30 @@ use lyon_tessellation::{
 
 
 // --- Configuration Structs ---
+#[derive(Deserialize, Serialize, Debug, Clone)] 
+struct ColorsConfig {
+    connector_line_rgb: Option<[u8; 3]>,
+    selected_connector_line_rgb: Option<[u8; 3]>,
+    preview_connector_line_rgb: Option<[u8; 3]>, // Alpha will be hardcoded
+    default_port_rgb: Option<[u8; 3]>,
+    selected_connector_port_rgb: Option<[u8; 3]>,
+    active_new_line_start_port_rgb: Option<[u8; 3]>,
+}
+
+impl Default for ColorsConfig {
+    fn default() -> Self {
+        ColorsConfig {
+            connector_line_rgb: None,
+            selected_connector_line_rgb: None,
+            preview_connector_line_rgb: None,
+            default_port_rgb: None,
+            selected_connector_port_rgb: None,
+            active_new_line_start_port_rgb: None,
+        }
+    }
+}
+
+
 #[derive(Deserialize, Serialize, Debug)]
 struct WindowConfig {
     width: f32,
@@ -34,12 +58,8 @@ struct ShapeConfig {
     width: f32,
     height: f32,
     corner_radius: f32,
-    color_r: u8,
-    color_g: u8,
-    color_b: u8,
-    selection_outline_color_r: Option<u8>,
-    selection_outline_color_g: Option<u8>,
-    selection_outline_color_b: Option<u8>,
+    base_color_rgb: [u8; 3], // Changed from color_r, color_g, color_b
+    selection_outline_color_rgb: Option<[u8; 3]>, // Changed from _r, _g, _b options
     selection_outline_width: Option<f32>,
 }
 
@@ -47,26 +67,21 @@ struct ShapeConfig {
 struct AppConfig {
     window: WindowConfig,
     shape: ShapeConfig,
+    colors: Option<ColorsConfig>, 
 }
 
-// --- Constants ---
+// --- Constants for non-color visual properties ---
 const DOUBLE_CLICK_MAX_DELAY_MS: u128 = 500;
 const DOUBLE_CLICK_MAX_DISTANCE: f32 = 10.0;
 const TEXT_PADDING: f32 = 8.0;
 const CONNECTOR_LINE_WIDTH: f32 = 2.0;
-const CONNECTOR_LINE_COLOR: Color = Color::WHITE;
-const SELECTED_CONNECTOR_LINE_COLOR: Color = Color::CYAN;
-const PREVIEW_CONNECTOR_LINE_COLOR: Color = Color::new(0.8, 0.8, 0.8, 0.7);
 const CONNECTOR_CURVE_OFFSET: f32 = 40.0; 
 
-const CONNECTOR_CIRCLE_DRAW_RADIUS_DEFAULT: f32 = 4.0; // Default small radius
-const CONNECTOR_CIRCLE_DRAW_RADIUS_HOVER: f32 = 8.0;  // Radius when mouse is near
-const CONNECTOR_CIRCLE_CLICK_RADIUS: f32 = 8.0;     // Radius used for click detection (matches hover)
-const CONNECTOR_CIRCLE_HOVER_DETECT_DISTANCE: f32 = 15.0; // How close mouse needs to be to trigger hover
+const PORT_DRAW_RADIUS_DEFAULT: f32 = 4.0; 
+const PORT_DRAW_RADIUS_HOVER: f32 = 8.0;  
+const PORT_CLICK_RADIUS: f32 = 8.0;     
+const PORT_HOVER_DETECT_DISTANCE: f32 = 15.0; 
 
-const CONNECTOR_CIRCLE_COLOR: Color = Color::WHITE;
-const SELECTED_CONNECTOR_CIRCLE_COLOR: Color = Color::CYAN;
-const ACTIVE_NEW_LINE_START_CIRCLE_COLOR: Color = Color::GREEN;
 const CONNECTOR_POINT_HORIZONTAL_OFFSET: f32 = 15.0;
 const CONNECTOR_SELECTION_RADIUS: f32 = CONNECTOR_LINE_WIDTH * 4.0; 
 const CONNECTOR_SAMPLE_POINTS: usize = 10;
@@ -100,6 +115,14 @@ struct AppState {
     
     ui_scale: f32, 
 
+    // Colors loaded from config or defaulted
+    connector_line_color: Color,
+    selected_connector_line_color: Color,
+    preview_connector_line_color: Color,
+    default_port_color: Color,
+    selected_connector_port_color: Color,
+    active_new_line_start_port_color: Color,
+
     last_click_time: Option<Instant>,
     last_click_pos: Option<Vec2>, 
     selected_shape_index: Option<usize>,
@@ -119,11 +142,19 @@ struct AppState {
 impl AppState {
     fn new(_ctx: &mut Context, app_config: &AppConfig) -> GameResult<AppState> {
         let shape_config = &app_config.shape;
+        let colors_config = app_config.colors.clone().unwrap_or_default(); 
 
-        let sel_color_r = shape_config.selection_outline_color_r.unwrap_or(255);
-        let sel_color_g = shape_config.selection_outline_color_g.unwrap_or(255);
-        let sel_color_b = shape_config.selection_outline_color_b.unwrap_or(0);
-        let selection_outline_color = Color::from_rgb(sel_color_r, sel_color_g, sel_color_b);
+        // Shape base color
+        let default_shape_color = Color::from_rgb(
+            shape_config.base_color_rgb[0],
+            shape_config.base_color_rgb[1],
+            shape_config.base_color_rgb[2],
+        );
+
+        // Shape selection outline color
+        let selection_outline_color = shape_config.selection_outline_color_rgb
+            .map_or(Color::from_rgb(255, 255, 0), |rgb| Color::from_rgb(rgb[0], rgb[1], rgb[2])); // Default Yellow
+
         let selection_outline_width = shape_config.selection_outline_width.unwrap_or(2.0);
 
         let ui_scale = match app_config.window.ui_scale_factor {
@@ -136,20 +167,46 @@ impl AppState {
         };
         println!("Using UI Scale Factor: {}", ui_scale);
 
+        // Load other colors or use defaults
+        let connector_line_color = colors_config.connector_line_rgb
+            .map_or(Color::WHITE, |rgb| Color::from_rgb(rgb[0], rgb[1], rgb[2]));
+        let selected_connector_line_color = colors_config.selected_connector_line_rgb
+            .map_or(Color::CYAN, |rgb| Color::from_rgb(rgb[0], rgb[1], rgb[2]));
+        
+        // Preview line color: use RGB from config, hardcode alpha
+        let preview_connector_line_color_rgb = colors_config.preview_connector_line_rgb
+            .unwrap_or([204, 204, 204]); // Default light gray RGB
+        let preview_connector_line_color = Color::from_rgba(
+            preview_connector_line_color_rgb[0],
+            preview_connector_line_color_rgb[1],
+            preview_connector_line_color_rgb[2],
+            178, // Alpha for ~0.7 opacity (0-255 range)
+        );
+
+        let default_port_color = colors_config.default_port_rgb
+            .map_or(Color::WHITE, |rgb| Color::from_rgb(rgb[0], rgb[1], rgb[2]));
+        let selected_connector_port_color = colors_config.selected_connector_port_rgb
+            .map_or(Color::CYAN, |rgb| Color::from_rgb(rgb[0], rgb[1], rgb[2]));
+        let active_new_line_start_port_color = colors_config.active_new_line_start_port_rgb
+            .map_or(Color::from_rgb(50, 205, 50), |rgb| Color::from_rgb(rgb[0], rgb[1], rgb[2]));
+
+
         Ok(AppState {
             live_mouse_pos: Vec2::new(0.0, 0.0),
             clicked_shapes: Vec::new(),
-            default_shape_color: Color::from_rgb(
-                shape_config.color_r,
-                shape_config.color_g,
-                shape_config.color_b,
-            ),
+            default_shape_color, // Use loaded/defaulted shape color
             default_shape_width: shape_config.width,
             default_shape_height: shape_config.height,
             default_shape_corner_radius: shape_config.corner_radius,
             selection_outline_color,
             selection_outline_width,
             ui_scale, 
+            connector_line_color,
+            selected_connector_line_color,
+            preview_connector_line_color,
+            default_port_color,
+            selected_connector_port_color,
+            active_new_line_start_port_color,
             last_click_time: None,
             last_click_pos: None,
             selected_shape_index: None,
@@ -165,15 +222,15 @@ impl AppState {
         })
     }
 
-    // Helper to get connector point coordinates
-    fn get_connector_point(&self, shape_index: usize, is_outgoing: bool) -> Option<Vec2> {
+    // Helper to get port coordinates
+    fn get_port_point(&self, shape_index: usize, is_outgoing_port: bool) -> Option<Vec2> {
         if shape_index < self.clicked_shapes.len() {
             let shape_data = &self.clicked_shapes[shape_index];
             let x_base = shape_data.center_position.x - self.default_shape_width / 2.0;
             let y_base = shape_data.center_position.y;
-            if is_outgoing { // Bottom-left
+            if is_outgoing_port { // Bottom-left port
                 Some(Vec2::new(x_base + CONNECTOR_POINT_HORIZONTAL_OFFSET, y_base + self.default_shape_height / 2.0))
-            } else { // Top-left
+            } else { // Top-left port
                 Some(Vec2::new(x_base + CONNECTOR_POINT_HORIZONTAL_OFFSET, y_base - self.default_shape_height / 2.0))
             }
         } else {
@@ -215,8 +272,8 @@ impl EventHandler<ggez::GameError> for AppState {
         // --- Draw Existing Connector Lines ---
         for (conn_idx, connection) in self.connections.iter().enumerate() {
             if let (Some(start_point_ggez), Some(end_point_ggez)) = (
-                self.get_connector_point(connection.from_shape_index, true), 
-                self.get_connector_point(connection.to_shape_index, false)    
+                self.get_port_point(connection.from_shape_index, true), 
+                self.get_port_point(connection.to_shape_index, false)    
             ) {
                 let start_point_lyon = LyonPoint::new(start_point_ggez.x, start_point_ggez.y);
                 let end_point_lyon = LyonPoint::new(end_point_ggez.x, end_point_ggez.y);
@@ -232,9 +289,9 @@ impl EventHandler<ggez::GameError> for AppState {
                 let lyon_path = path_builder.build();
 
                 let current_line_color = if self.selected_connector_index == Some(conn_idx) {
-                    SELECTED_CONNECTOR_LINE_COLOR
+                    self.selected_connector_line_color
                 } else {
-                    CONNECTOR_LINE_COLOR
+                    self.connector_line_color
                 };
                 
                 let mut geometry: VertexBuffers<Vertex, u32> = VertexBuffers::new();
@@ -261,15 +318,15 @@ impl EventHandler<ggez::GameError> for AppState {
         // --- Draw Preview Connector Line ---
         if self.drawing_new_line {
             if let (Some((start_shape_idx, start_is_outgoing)), Some(preview_end_pos)) = (self.new_line_start_info, self.new_line_preview_end_pos) {
-                if let Some(start_pos) = self.get_connector_point(start_shape_idx, start_is_outgoing) {
-                     let line_preview_mesh = Mesh::new_line(ctx, &[start_pos, preview_end_pos], CONNECTOR_LINE_WIDTH / 2.0, PREVIEW_CONNECTOR_LINE_COLOR)?;
+                if let Some(start_pos) = self.get_port_point(start_shape_idx, start_is_outgoing) {
+                     let line_preview_mesh = Mesh::new_line(ctx, &[start_pos, preview_end_pos], CONNECTOR_LINE_WIDTH / 2.0, self.preview_connector_line_color)?;
                      canvas.draw(&line_preview_mesh, graphics::DrawParam::default());
                 }
             }
         }
 
 
-        // --- Draw Shapes, Outlines, Text, and Connector Points on Shapes ---
+        // --- Draw Shapes, Outlines, Text, and Ports on Shapes ---
         for (index, shape_data) in self.clicked_shapes.iter().enumerate() {
             let rect = Rect::new(
                 shape_data.center_position.x - self.default_shape_width / 2.0,
@@ -280,43 +337,42 @@ impl EventHandler<ggez::GameError> for AppState {
             let rounded_rect_mesh = Mesh::new_rounded_rectangle(ctx, DrawMode::fill(), rect, self.default_shape_corner_radius, self.default_shape_color)?;
             canvas.draw(&rounded_rect_mesh, graphics::DrawParam::default());
 
-            // Determine connector circle colors and radii
-            let mut outgoing_circle_color = CONNECTOR_CIRCLE_COLOR;
-            let mut incoming_circle_color = CONNECTOR_CIRCLE_COLOR;
-            let mut outgoing_circle_radius = CONNECTOR_CIRCLE_DRAW_RADIUS_DEFAULT;
-            let mut incoming_circle_radius = CONNECTOR_CIRCLE_DRAW_RADIUS_DEFAULT;
-
+            // Determine port colors and radii
+            let mut outgoing_port_color = self.default_port_color;
+            let mut incoming_port_color = self.default_port_color;
+            let mut outgoing_port_radius = PORT_DRAW_RADIUS_DEFAULT;
+            let mut incoming_port_radius = PORT_DRAW_RADIUS_DEFAULT;
 
             if let Some(conn_idx) = self.selected_connector_index {
                 if conn_idx < self.connections.len() {
                     let selected_conn = &self.connections[conn_idx];
-                    if selected_conn.from_shape_index == index { outgoing_circle_color = SELECTED_CONNECTOR_CIRCLE_COLOR; }
-                    if selected_conn.to_shape_index == index { incoming_circle_color = SELECTED_CONNECTOR_CIRCLE_COLOR; }
+                    if selected_conn.from_shape_index == index { outgoing_port_color = self.selected_connector_port_color; }
+                    if selected_conn.to_shape_index == index { incoming_port_color = self.selected_connector_port_color; }
                 }
             }
             if let Some((start_idx, is_out)) = self.new_line_start_info {
                 if start_idx == index {
-                    if is_out { outgoing_circle_color = ACTIVE_NEW_LINE_START_CIRCLE_COLOR; }
-                    else { incoming_circle_color = ACTIVE_NEW_LINE_START_CIRCLE_COLOR; }
+                    if is_out { outgoing_port_color = self.active_new_line_start_port_color; }
+                    else { incoming_port_color = self.active_new_line_start_port_color; }
                 }
             }
 
-            // Check for hover on outgoing point
-            if let Some(outgoing_point_ggez) = self.get_connector_point(index, true) {
-                if self.live_mouse_pos.distance(outgoing_point_ggez) <= CONNECTOR_CIRCLE_HOVER_DETECT_DISTANCE {
-                    outgoing_circle_radius = CONNECTOR_CIRCLE_DRAW_RADIUS_HOVER;
+            // Check for hover on outgoing port
+            if let Some(outgoing_point_ggez) = self.get_port_point(index, true) {
+                if self.live_mouse_pos.distance(outgoing_point_ggez) <= PORT_HOVER_DETECT_DISTANCE {
+                    outgoing_port_radius = PORT_DRAW_RADIUS_HOVER;
                 }
-                let outgoing_circle_mesh = Mesh::new_circle(ctx, DrawMode::fill(), outgoing_point_ggez, outgoing_circle_radius, 0.1, outgoing_circle_color)?;
-                canvas.draw(&outgoing_circle_mesh, graphics::DrawParam::default());
+                let outgoing_port_mesh = Mesh::new_circle(ctx, DrawMode::fill(), outgoing_point_ggez, outgoing_port_radius, 0.1, outgoing_port_color)?;
+                canvas.draw(&outgoing_port_mesh, graphics::DrawParam::default());
             }
 
-            // Check for hover on incoming point
-            if let Some(incoming_point_ggez) = self.get_connector_point(index, false) {
-                 if self.live_mouse_pos.distance(incoming_point_ggez) <= CONNECTOR_CIRCLE_HOVER_DETECT_DISTANCE {
-                    incoming_circle_radius = CONNECTOR_CIRCLE_DRAW_RADIUS_HOVER;
+            // Check for hover on incoming port
+            if let Some(incoming_point_ggez) = self.get_port_point(index, false) {
+                 if self.live_mouse_pos.distance(incoming_point_ggez) <= PORT_HOVER_DETECT_DISTANCE {
+                    incoming_port_radius = PORT_DRAW_RADIUS_HOVER;
                 }
-                let incoming_circle_mesh = Mesh::new_circle(ctx, DrawMode::fill(), incoming_point_ggez, incoming_circle_radius, 0.1, incoming_circle_color)?;
-                canvas.draw(&incoming_circle_mesh, graphics::DrawParam::default());
+                let incoming_port_mesh = Mesh::new_circle(ctx, DrawMode::fill(), incoming_point_ggez, incoming_port_radius, 0.1, incoming_port_color)?;
+                canvas.draw(&incoming_port_mesh, graphics::DrawParam::default());
             }
 
 
@@ -379,15 +435,15 @@ impl EventHandler<ggez::GameError> for AppState {
                     for (target_idx, _target_shape_data) in self.clicked_shapes.iter().enumerate() {
                         if target_idx == start_shape_idx { continue; } 
 
-                        if let Some(target_incoming_pos) = self.get_connector_point(target_idx, false) { 
-                            if current_click_pos.distance(target_incoming_pos) <= CONNECTOR_CIRCLE_CLICK_RADIUS { // Use CLICK_RADIUS
+                        if let Some(target_incoming_pos) = self.get_port_point(target_idx, false) { 
+                            if current_click_pos.distance(target_incoming_pos) <= PORT_CLICK_RADIUS { 
                                 let new_connection = UserConnection { from_shape_index: start_shape_idx, to_shape_index: target_idx };
                                 if !self.connections.contains(&new_connection) { self.connections.push(new_connection); }
                                 connected_to_target = true; break;
                             }
                         }
-                        if let Some(target_outgoing_pos) = self.get_connector_point(target_idx, true) { 
-                             if current_click_pos.distance(target_outgoing_pos) <= CONNECTOR_CIRCLE_CLICK_RADIUS { // Use CLICK_RADIUS
+                        if let Some(target_outgoing_pos) = self.get_port_point(target_idx, true) { 
+                             if current_click_pos.distance(target_outgoing_pos) <= PORT_CLICK_RADIUS { 
                                 let new_connection = UserConnection { from_shape_index: start_shape_idx, to_shape_index: target_idx };
                                  if !self.connections.contains(&new_connection) { self.connections.push(new_connection); }
                                 connected_to_target = true; break;
@@ -440,22 +496,22 @@ impl EventHandler<ggez::GameError> for AppState {
                 return Ok(());
             }
             
-            // --- Priority 3: Starting a new line from a connector circle ---
+            // --- Priority 3: Starting a new line from a port ---
             for (index, _shape_data) in self.clicked_shapes.iter().enumerate() {
-                if let Some(outgoing_pos) = self.get_connector_point(index, true) {
-                    if current_click_pos.distance(outgoing_pos) <= CONNECTOR_CIRCLE_CLICK_RADIUS { // Use CLICK_RADIUS
+                if let Some(outgoing_pos) = self.get_port_point(index, true) {
+                    if current_click_pos.distance(outgoing_pos) <= PORT_CLICK_RADIUS { 
                         self.drawing_new_line = true; self.new_line_start_info = Some((index, true));
                         self.selected_shape_index = None; self.selected_connector_index = None;
                         self.last_click_time = None; self.last_click_pos = None;
-                        println!("Starting new line from shape {} (outgoing).", index); return Ok(());
+                        println!("Starting new line from shape {} (outgoing port).", index); return Ok(());
                     }
                 }
-                if let Some(incoming_pos) = self.get_connector_point(index, false) {
-                    if current_click_pos.distance(incoming_pos) <= CONNECTOR_CIRCLE_CLICK_RADIUS { // Use CLICK_RADIUS
+                if let Some(incoming_pos) = self.get_port_point(index, false) {
+                    if current_click_pos.distance(incoming_pos) <= PORT_CLICK_RADIUS { 
                         self.drawing_new_line = true; self.new_line_start_info = Some((index, false));
                         self.selected_shape_index = None; self.selected_connector_index = None;
                         self.last_click_time = None; self.last_click_pos = None;
-                        println!("Starting new line from shape {} (incoming).", index); return Ok(());
+                        println!("Starting new line from shape {} (incoming port).", index); return Ok(());
                     }
                 }
             }
@@ -464,8 +520,8 @@ impl EventHandler<ggez::GameError> for AppState {
             let mut clicked_on_existing_connector_idx: Option<usize> = None;
             for (conn_idx, connection) in self.connections.iter().enumerate() {
                  if let (Some(start_point_ggez), Some(end_point_ggez)) = (
-                    self.get_connector_point(connection.from_shape_index, true),
-                    self.get_connector_point(connection.to_shape_index, false)
+                    self.get_port_point(connection.from_shape_index, true),
+                    self.get_port_point(connection.to_shape_index, false)
                 ) {
                     let p0 = LyonPoint::new(start_point_ggez.x, start_point_ggez.y);
                     let p3 = LyonPoint::new(end_point_ggez.x, end_point_ggez.y);
@@ -621,7 +677,7 @@ fn load_config() -> AppConfig {
         window: WindowConfig {
             width: 800.0,
             height: 600.0,
-            title: "Rust: Shapes - User Lines (Default)".to_string(), 
+            title: "Rust: Shapes - Configurable Colors (Default)".to_string(), 
             msaa_level: None, 
             ui_scale_factor: None, 
         },
@@ -629,14 +685,11 @@ fn load_config() -> AppConfig {
             width: 120.0,
             height: 70.0,
             corner_radius: 10.0,
-            color_r: 100,
-            color_g: 200,
-            color_b: 255,
-            selection_outline_color_r: None,
-            selection_outline_color_g: None,
-            selection_outline_color_b: None,
+            base_color_rgb: [100, 200, 255], // Default shape base color
+            selection_outline_color_rgb: None, // Will default to Yellow in AppState
             selection_outline_width: None,
         },
+        colors: None, 
     };
 
     let config_path = "config.toml";
@@ -686,7 +739,7 @@ pub fn main() -> GameResult {
     println!("Using MSAA level: {:?}", msaa);
 
 
-    let (mut ctx, event_loop) = ContextBuilder::new("shapes_app_user_lines", "YourName")
+    let (mut ctx, event_loop) = ContextBuilder::new("shapes_app_configurable_colors", "YourName")
         .window_setup(
             WindowSetup::default()
                 .title(&app_config.window.title)
