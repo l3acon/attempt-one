@@ -5,19 +5,19 @@ use ggez::event::{self, EventHandler, MouseButton};
 use ggez::glam::Vec2; // For 2D vectors (coordinates)
 use ggez::graphics::{self, Color, DrawMode, Mesh};
 use ggez::{Context, ContextBuilder, GameResult};
-use serde::{Deserialize, Serialize}; // Import Serialize
-use std::fs; // For file system operations
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::time::Instant; // For tracking click times
 
 // --- Configuration Structs ---
-// Added Serialize to the derive macro for all config structs
-#[derive(Deserialize, Serialize, Debug)] 
+#[derive(Deserialize, Serialize, Debug)]
 struct WindowConfig {
     width: f32,
     height: f32,
     title: String,
 }
 
-#[derive(Deserialize, Serialize, Debug, Clone)] 
+#[derive(Deserialize, Serialize, Debug, Clone)]
 struct CircleConfig {
     radius: f32,
     color_r: u8,
@@ -31,12 +31,18 @@ struct AppConfig {
     circle: CircleConfig,
 }
 
+// --- Constants for Double Click ---
+const DOUBLE_CLICK_MAX_DELAY_MS: u128 = 500; // Max milliseconds between clicks
+const DOUBLE_CLICK_MAX_DISTANCE: f32 = 10.0; // Max pixels mouse can move
+
 // --- AppState Struct ---
 struct AppState {
     live_mouse_pos: Vec2,
     clicked_circles_positions: Vec<Vec2>,
-    circle_color: Color, 
-    circle_radius: f32,  
+    circle_color: Color,
+    circle_radius: f32,
+    last_click_time: Option<Instant>, // Time of the last click
+    last_click_pos: Option<Vec2>,   // Position of the last click
 }
 
 impl AppState {
@@ -50,11 +56,13 @@ impl AppState {
                 circle_config.color_b,
             ),
             circle_radius: circle_config.radius,
+            last_click_time: None,
+            last_click_pos: None,
         })
     }
 }
 
-// --- EventHandler Implementation (mostly unchanged) ---
+// --- EventHandler Implementation ---
 impl EventHandler<ggez::GameError> for AppState {
     fn update(&mut self, _ctx: &mut Context) -> GameResult {
         Ok(())
@@ -68,9 +76,9 @@ impl EventHandler<ggez::GameError> for AppState {
                 ctx,
                 DrawMode::fill(),
                 pos,
-                self.circle_radius, 
+                self.circle_radius,
                 0.1,
-                self.circle_color, 
+                self.circle_color,
             )?;
             canvas.draw(&circle_mesh, graphics::DrawParam::default());
         }
@@ -103,12 +111,39 @@ impl EventHandler<ggez::GameError> for AppState {
         y: f32,
     ) -> GameResult {
         if button == MouseButton::Left {
-            let click_pos = Vec2::new(x, y);
-            println!(
-                "Left mouse button pressed at: ({}, {}) - New circle added.",
-                click_pos.x, click_pos.y
-            );
-            self.clicked_circles_positions.push(click_pos);
+            let current_click_time = Instant::now();
+            let current_click_pos = Vec2::new(x, y);
+
+            if let (Some(last_time), Some(last_pos)) = (self.last_click_time, self.last_click_pos) {
+                let duration_since_last = current_click_time.duration_since(last_time).as_millis();
+                let distance_from_last = current_click_pos.distance(last_pos);
+
+                if duration_since_last <= DOUBLE_CLICK_MAX_DELAY_MS
+                    && distance_from_last <= DOUBLE_CLICK_MAX_DISTANCE
+                {
+                    // This is a double click!
+                    println!(
+                        "Double click at: ({}, {}) - New circle added.",
+                        current_click_pos.x, current_click_pos.y
+                    );
+                    self.clicked_circles_positions.push(current_click_pos);
+
+                    // Reset last click info to prevent the second click of this double-click
+                    // from becoming the first click of a new potential double-click.
+                    self.last_click_time = None;
+                    self.last_click_pos = None;
+                } else {
+                    // Not a double click (too slow or too far), treat as a new first click.
+                    self.last_click_time = Some(current_click_time);
+                    self.last_click_pos = Some(current_click_pos);
+                    println!("Single click at: ({}, {}) (potential first of double)", x, y);
+                }
+            } else {
+                // This is the first click (or first after a successful double click).
+                self.last_click_time = Some(current_click_time);
+                self.last_click_pos = Some(current_click_pos);
+                println!("Single click at: ({}, {}) (potential first of double)", x, y);
+            }
         }
         Ok(())
     }
@@ -121,7 +156,9 @@ impl EventHandler<ggez::GameError> for AppState {
         y: f32,
     ) -> GameResult {
         if button == MouseButton::Left {
-            println!("Left mouse button released at: ({}, {})", x, y);
+            // This event is less critical for the double-click logic itself,
+            // but can be used for logging or other actions.
+            // println!("Left mouse button released at: ({}, {})", x, y);
         }
         Ok(())
     }
@@ -145,7 +182,7 @@ fn load_config() -> AppConfig {
         window: WindowConfig {
             width: 800.0,
             height: 600.0,
-            title: "Rust: Click to Add Circles (Default Config)".to_string(),
+            title: "Rust: Double Click to Add Circles (Default Config)".to_string(),
         },
         circle: CircleConfig {
             radius: 30.0,
@@ -176,8 +213,7 @@ fn load_config() -> AppConfig {
                 "{} not found. Using default configuration and creating a new one.",
                 config_path
             );
-            // Attempt to create a default config.toml file
-            match toml::to_string_pretty(&default_config) { // This requires Serialize
+            match toml::to_string_pretty(&default_config) {
                 Ok(toml_string) => {
                     if let Err(e) = fs::write(config_path, toml_string) {
                         eprintln!("Could not write default {}: {}", config_path, e);
@@ -198,16 +234,16 @@ fn load_config() -> AppConfig {
 pub fn main() -> GameResult {
     let config = load_config();
 
-    let (mut ctx, event_loop) = ContextBuilder::new("configurable_circles_app", "YourName")
-        .window_setup(WindowSetup::default().title(&config.window.title)) 
+    let (mut ctx, event_loop) = ContextBuilder::new("configurable_circles_app_double_click", "YourName")
+        .window_setup(WindowSetup::default().title(&config.window.title))
         .window_mode(
             WindowMode::default()
-                .dimensions(config.window.width, config.window.height) 
+                .dimensions(config.window.width, config.window.height)
                 .resizable(true),
         )
         .build()?;
 
-    let app_state = AppState::new(&mut ctx, &config.circle)?; 
+    let app_state = AppState::new(&mut ctx, &config.circle)?;
 
     event::run(ctx, event_loop, app_state)
 }
