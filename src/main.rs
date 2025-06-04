@@ -26,6 +26,11 @@ struct ShapeConfig {
     color_r: u8,
     color_g: u8,
     color_b: u8,
+    // Optional selection outline properties
+    selection_outline_color_r: Option<u8>,
+    selection_outline_color_g: Option<u8>,
+    selection_outline_color_b: Option<u8>,
+    selection_outline_width: Option<f32>,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -56,10 +61,14 @@ struct AppState {
     default_shape_height: f32,
     default_shape_corner_radius: f32,
 
+    // Selection outline properties (loaded from config or defaulted)
+    selection_outline_color: Color,
+    selection_outline_width: f32,
+
     last_click_time: Option<Instant>,
     last_click_pos: Option<Vec2>,
 
-    selected_shape_index: Option<usize>, // Index of the currently selected shape
+    selected_shape_index: Option<usize>,
     dragged_shape_index: Option<usize>,
     drag_offset: Option<Vec2>,
 
@@ -69,6 +78,15 @@ struct AppState {
 
 impl AppState {
     fn new(_ctx: &mut Context, shape_config: &ShapeConfig) -> GameResult<AppState> {
+        // Determine selection outline color
+        let sel_color_r = shape_config.selection_outline_color_r.unwrap_or(255); // Default Yellow R
+        let sel_color_g = shape_config.selection_outline_color_g.unwrap_or(255); // Default Yellow G
+        let sel_color_b = shape_config.selection_outline_color_b.unwrap_or(0);   // Default Yellow B
+        let selection_outline_color = Color::from_rgb(sel_color_r, sel_color_g, sel_color_b);
+
+        // Determine selection outline width
+        let selection_outline_width = shape_config.selection_outline_width.unwrap_or(2.0); // Default width 2.0
+
         Ok(AppState {
             live_mouse_pos: Vec2::new(0.0, 0.0),
             clicked_shapes: Vec::new(),
@@ -80,9 +98,11 @@ impl AppState {
             default_shape_width: shape_config.width,
             default_shape_height: shape_config.height,
             default_shape_corner_radius: shape_config.corner_radius,
+            selection_outline_color, // Use determined color
+            selection_outline_width, // Use determined width
             last_click_time: None,
             last_click_pos: None,
-            selected_shape_index: None, 
+            selected_shape_index: None,
             dragged_shape_index: None,
             drag_offset: None,
             editing_shape_index: None,
@@ -101,7 +121,6 @@ impl EventHandler<ggez::GameError> for AppState {
         let mut canvas = graphics::Canvas::from_frame(ctx, graphics::Color::from_rgb(30, 30, 40));
 
         for (index, shape_data) in self.clicked_shapes.iter().enumerate() {
-            // This is the main rectangle for the shape's fill
             let rect = Rect::new(
                 shape_data.center_position.x - self.default_shape_width / 2.0,
                 shape_data.center_position.y - self.default_shape_height / 2.0,
@@ -110,45 +129,38 @@ impl EventHandler<ggez::GameError> for AppState {
             );
 
             let shape_color_to_draw = self.default_shape_color;
-            // Note: Visual feedback for selection is now handled by drawing a separate outline below.
 
             let rounded_rect_mesh = Mesh::new_rounded_rectangle(
                 ctx,
                 DrawMode::fill(),
-                rect, // Use the original rect for the main shape
+                rect,
                 self.default_shape_corner_radius,
                 shape_color_to_draw,
             )?;
             canvas.draw(&rounded_rect_mesh, graphics::DrawParam::default());
 
-            // Draw selection outline if selected and not editing
             if self.selected_shape_index == Some(index) && self.editing_shape_index != Some(index) {
-                // Calculate properties for the outline rect, centered on the original rect
                 let center_x = rect.x + rect.w / 2.0;
                 let center_y = rect.y + rect.h / 2.0;
-                let outline_w = rect.w * 1.05; // Make outline slightly wider
-                let outline_h = rect.h * 1.05; // Make outline slightly taller
+                let outline_w = rect.w * 1.05;
+                let outline_h = rect.h * 1.05;
 
-                // Create a new Rect for the outline's bounds
                 let outline_bounds = Rect::new(
                     center_x - outline_w / 2.0,
                     center_y - outline_h / 2.0,
                     outline_w,
-                    outline_h
+                    outline_h,
                 );
 
                 let outline_rect_mesh = Mesh::new_rounded_rectangle(
                     ctx,
-                    DrawMode::stroke(2.0), // Stroke width for the outline
-                    outline_bounds,        // Use the correctly defined Rect for the outline
-                    self.default_shape_corner_radius * 1.05, // Optionally scale corner radius
-                    Color::YELLOW,         // Outline color
+                    DrawMode::stroke(self.selection_outline_width), // Use configured width
+                    outline_bounds,
+                    self.default_shape_corner_radius * 1.05,
+                    self.selection_outline_color, // Use configured color
                 )?;
-                // Draw the mesh. Since its bounds are already in world coordinates,
-                // DrawParam::default() is sufficient.
                 canvas.draw(&outline_rect_mesh, graphics::DrawParam::default());
             }
-
 
             let text_to_display = if self.editing_shape_index == Some(index) {
                 format!("{}|", self.current_input_text)
@@ -194,9 +206,8 @@ impl EventHandler<ggez::GameError> for AppState {
             let current_click_time = Instant::now();
             let current_click_pos = Vec2::new(x, y);
             
-            let mut clicked_on_shape_details: Option<(usize, Vec2)> = None; // (index, center_position_of_clicked_shape)
+            let mut clicked_on_shape_details: Option<(usize, Vec2)> = None;
 
-            // Phase 1: Identify if a click landed on any shape
             for (index, shape_data) in self.clicked_shapes.iter().enumerate().rev() {
                 let shape_rect = Rect::new(
                     shape_data.center_position.x - self.default_shape_width / 2.0,
@@ -211,8 +222,6 @@ impl EventHandler<ggez::GameError> for AppState {
             }
 
             if let Some((clicked_idx, clicked_shape_center)) = clicked_on_shape_details {
-                // --- Click was on an existing shape ---
-                // 1. Finalize editing if a *different* shape was being edited
                 if self.editing_shape_index.is_some() && self.editing_shape_index != Some(clicked_idx) {
                     if let Some(editing_idx_val) = self.editing_shape_index.take() {
                         self.clicked_shapes[editing_idx_val].text = if self.current_input_text.is_empty() { None } else { Some(self.current_input_text.clone()) };
@@ -221,9 +230,8 @@ impl EventHandler<ggez::GameError> for AppState {
                     }
                 }
                 
-                self.selected_shape_index = Some(clicked_idx); // Select the clicked shape
+                self.selected_shape_index = Some(clicked_idx);
 
-                // 2. Check for double-click on this shape to start/continue editing
                 let mut is_double_click_for_edit = false;
                 if let (Some(last_time), Some(last_pos)) = (self.last_click_time, self.last_click_pos) {
                     let duration = current_click_time.duration_since(last_time).as_millis();
@@ -241,7 +249,6 @@ impl EventHandler<ggez::GameError> for AppState {
                     self.last_click_time = None; 
                     self.last_click_pos = None;
                 } else {
-                    // Single click on this shape: start dragging
                     println!("Single-click on shape {}: selected. Starting drag.", clicked_idx);
                     self.dragged_shape_index = Some(clicked_idx);
                     self.drag_offset = Some(clicked_shape_center - current_click_pos);
@@ -250,18 +257,15 @@ impl EventHandler<ggez::GameError> for AppState {
                 }
 
             } else {
-                // --- Click was on empty space ---
-                // 1. Finalize editing if any shape was being edited
                 if let Some(editing_idx_val) = self.editing_shape_index.take() {
                     self.clicked_shapes[editing_idx_val].text = if self.current_input_text.is_empty() { None } else { Some(self.current_input_text.clone()) };
                     self.current_input_text.clear();
                     println!("Clicked empty space: finalized text for shape {}.", editing_idx_val);
                 }
                 
-                self.selected_shape_index = None; // Deselect any shape
-                self.dragged_shape_index = None; // Stop any drag if clicked on empty space
+                self.selected_shape_index = None; 
+                self.dragged_shape_index = None;
 
-                // 2. Check for double-click on empty space to create new shape
                 let mut is_double_click_for_create = false;
                 if let (Some(last_time), Some(last_pos)) = (self.last_click_time, self.last_click_pos) {
                     let duration = current_click_time.duration_since(last_time).as_millis();
@@ -275,13 +279,12 @@ impl EventHandler<ggez::GameError> for AppState {
                     println!("Double-click on empty space: New shape added & now editing.");
                     self.clicked_shapes.push(ShapeData { center_position: current_click_pos, text: None });
                     let new_idx = self.clicked_shapes.len() - 1;
-                    self.selected_shape_index = Some(new_idx); // New shape is selected
-                    self.editing_shape_index = Some(new_idx); // Start editing it
+                    self.selected_shape_index = Some(new_idx); 
+                    self.editing_shape_index = Some(new_idx); 
                     self.current_input_text.clear();
                     self.last_click_time = None; 
                     self.last_click_pos = None;
                 } else {
-                    // Single click on empty space: record for potential next double-click
                     println!("Single click on empty space.");
                     self.last_click_time = Some(current_click_time);
                     self.last_click_pos = Some(current_click_pos);
@@ -294,7 +297,6 @@ impl EventHandler<ggez::GameError> for AppState {
     fn mouse_button_up_event(&mut self, _ctx: &mut Context, button: MouseButton, _x: f32, _y: f32) -> GameResult {
         if button == MouseButton::Left {
             if self.dragged_shape_index.is_some() {
-                // If a drag was happening, it ends. The shape remains selected.
                 println!("Dropped shape {}", self.dragged_shape_index.unwrap());
                 self.dragged_shape_index = None;
                 self.drag_offset = None;
@@ -325,7 +327,6 @@ impl EventHandler<ggez::GameError> for AppState {
 
     fn key_down_event(&mut self, _ctx: &mut Context, input: KeyInput, repeated: bool) -> GameResult {
         if let Some(keycode) = input.keycode {
-            // Handle text editing keys first if editing_shape_index is Some
             if self.editing_shape_index.is_some() {
                 match keycode {
                     KeyCode::Return | KeyCode::NumpadEnter => {
@@ -334,7 +335,6 @@ impl EventHandler<ggez::GameError> for AppState {
                             self.clicked_shapes[index].text = if self.current_input_text.is_empty() { None } else { Some(self.current_input_text.clone()) };
                             self.current_input_text.clear();
                             println!("Text editing finished for shape {}.", index);
-                            // After finishing edit, the shape remains selected but not editing.
                             self.selected_shape_index = Some(index); 
                         }
                     }
@@ -343,9 +343,8 @@ impl EventHandler<ggez::GameError> for AppState {
                         self.editing_shape_index = None;
                         self.current_input_text.clear();
                         println!("Text editing cancelled.");
-                        // Shape might still be selected if it was before editing started.
                     }
-                    KeyCode::Back => { // Allows repeat for continuous delete
+                    KeyCode::Back => { 
                         self.current_input_text.pop();
                     }
                     KeyCode::Delete => {
@@ -354,7 +353,6 @@ impl EventHandler<ggez::GameError> for AppState {
                     _ => { if repeated { return Ok(()); } }
                 }
             } else {
-                // Not editing text, so keys can affect selected shapes
                 if let Some(index_to_delete) = self.selected_shape_index {
                     if keycode == KeyCode::Delete {
                         if repeated { return Ok(()); } 
@@ -381,7 +379,7 @@ fn load_config() -> AppConfig {
         window: WindowConfig {
             width: 800.0,
             height: 600.0,
-            title: "Rust: Shapes - Text, Drag, Delete (Default)".to_string(),
+            title: "Rust: Shapes - Configurable Selection (Default)".to_string(),
         },
         shape: ShapeConfig {
             width: 120.0,
@@ -390,6 +388,12 @@ fn load_config() -> AppConfig {
             color_r: 100,
             color_g: 200,
             color_b: 255,
+            // Default config written to file will not include these,
+            // demonstrating they are optional. AppState::new will use hardcoded defaults.
+            selection_outline_color_r: None,
+            selection_outline_color_g: None,
+            selection_outline_color_b: None,
+            selection_outline_width: None,
         },
     };
 
@@ -424,7 +428,7 @@ fn load_config() -> AppConfig {
 
 pub fn main() -> GameResult {
     let config = load_config();
-    let (mut ctx, event_loop) = ContextBuilder::new("shapes_app_delete", "YourName")
+    let (mut ctx, event_loop) = ContextBuilder::new("shapes_app_configurable_selection", "YourName")
         .window_setup(WindowSetup::default().title(&config.window.title))
         .window_mode(
             WindowMode::default()
