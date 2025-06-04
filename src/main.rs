@@ -3,7 +3,7 @@
 use ggez::conf::{WindowMode, WindowSetup};
 use ggez::event::{self, EventHandler, MouseButton};
 use ggez::glam::Vec2; // For 2D vectors (coordinates)
-use ggez::graphics::{self, Color, DrawMode, Mesh};
+use ggez::graphics::{self, Color, DrawMode, Mesh, Rect}; // Added Rect
 use ggez::{Context, ContextBuilder, GameResult};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -17,9 +17,12 @@ struct WindowConfig {
     title: String,
 }
 
+// Renamed from CircleConfig to ShapeConfig and updated fields
 #[derive(Deserialize, Serialize, Debug, Clone)]
-struct CircleConfig {
-    radius: f32,
+struct ShapeConfig {
+    width: f32,
+    height: f32,
+    corner_radius: f32,
     color_r: u8,
     color_g: u8,
     color_b: u8,
@@ -28,7 +31,7 @@ struct CircleConfig {
 #[derive(Deserialize, Serialize, Debug)]
 struct AppConfig {
     window: WindowConfig,
-    circle: CircleConfig,
+    shape: ShapeConfig, // Renamed from circle to shape
 }
 
 // --- Constants for Double Click ---
@@ -38,30 +41,35 @@ const DOUBLE_CLICK_MAX_DISTANCE: f32 = 10.0; // Max pixels mouse can move
 // --- AppState Struct ---
 struct AppState {
     live_mouse_pos: Vec2,
-    clicked_circles_positions: Vec<Vec2>,
-    circle_color: Color,
-    circle_radius: f32,
-    last_click_time: Option<Instant>, // Time of the last click (for double-click detection)
-    last_click_pos: Option<Vec2>,   // Position of the last click (for double-click detection)
-    dragged_circle_index: Option<usize>, // Index of the circle currently being dragged
-    drag_offset: Option<Vec2>,          // Offset from mouse to circle's center during drag
+    clicked_shapes_positions: Vec<Vec2>, // Stores center positions of shapes
+    shape_color: Color,
+    shape_width: f32,
+    shape_height: f32,
+    shape_corner_radius: f32,
+    last_click_time: Option<Instant>,
+    last_click_pos: Option<Vec2>,
+    dragged_shape_index: Option<usize>, // Index of the shape currently being dragged
+    drag_offset: Option<Vec2>,
 }
 
 impl AppState {
-    fn new(_ctx: &mut Context, circle_config: &CircleConfig) -> GameResult<AppState> {
+    // Updated to take ShapeConfig
+    fn new(_ctx: &mut Context, shape_config: &ShapeConfig) -> GameResult<AppState> {
         Ok(AppState {
             live_mouse_pos: Vec2::new(0.0, 0.0),
-            clicked_circles_positions: Vec::new(),
-            circle_color: Color::from_rgb(
-                circle_config.color_r,
-                circle_config.color_g,
-                circle_config.color_b,
+            clicked_shapes_positions: Vec::new(),
+            shape_color: Color::from_rgb(
+                shape_config.color_r,
+                shape_config.color_g,
+                shape_config.color_b,
             ),
-            circle_radius: circle_config.radius,
+            shape_width: shape_config.width,
+            shape_height: shape_config.height,
+            shape_corner_radius: shape_config.corner_radius,
             last_click_time: None,
             last_click_pos: None,
-            dragged_circle_index: None, // Initialize new field
-            drag_offset: None,          // Initialize new field
+            dragged_shape_index: None,
+            drag_offset: None,
         })
     }
 }
@@ -75,23 +83,31 @@ impl EventHandler<ggez::GameError> for AppState {
     fn draw(&mut self, ctx: &mut Context) -> GameResult {
         let mut canvas = graphics::Canvas::from_frame(ctx, graphics::Color::from_rgb(30, 30, 40));
 
-        for &pos in &self.clicked_circles_positions {
-            let circle_mesh = Mesh::new_circle(
+        // Draw all stored rounded rectangles
+        for &center_pos in &self.clicked_shapes_positions {
+            // Calculate top-left corner for the Rect from the center position
+            let rect = Rect::new(
+                center_pos.x - self.shape_width / 2.0,
+                center_pos.y - self.shape_height / 2.0,
+                self.shape_width,
+                self.shape_height,
+            );
+
+            let rounded_rect_mesh = Mesh::new_rounded_rectangle(
                 ctx,
                 DrawMode::fill(),
-                pos,
-                self.circle_radius,
-                0.1,
-                self.circle_color,
+                rect, // Use the calculated Rect
+                self.shape_corner_radius,
+                self.shape_color,
             )?;
-            canvas.draw(&circle_mesh, graphics::DrawParam::default());
+            canvas.draw(&rounded_rect_mesh, graphics::DrawParam::default());
         }
 
         let coords_text_string = format!(
-            "Mouse: {:.0}, {:.0} | Circles: {}",
+            "Mouse: {:.0}, {:.0} | Shapes: {}", // Changed "Circles" to "Shapes"
             self.live_mouse_pos.x,
             self.live_mouse_pos.y,
-            self.clicked_circles_positions.len()
+            self.clicked_shapes_positions.len()
         );
         let mut text_display = graphics::Text::new(coords_text_string);
         text_display.set_scale(20.0);
@@ -117,28 +133,32 @@ impl EventHandler<ggez::GameError> for AppState {
         if button == MouseButton::Left {
             let current_click_time = Instant::now();
             let current_click_pos = Vec2::new(x, y);
-            let mut clicked_on_circle_to_drag = false;
+            let mut clicked_on_shape_to_drag = false;
 
-            // 1. Check if we clicked on an existing circle to start a drag.
-            // Iterate in reverse order of drawing to pick the "topmost" circle if they overlap.
-            for (index, &circle_center) in self.clicked_circles_positions.iter().enumerate().rev() {
-                if current_click_pos.distance(circle_center) <= self.circle_radius {
-                    self.dragged_circle_index = Some(index);
-                    // Store the offset from the mouse click point to the circle's actual center.
-                    self.drag_offset = Some(circle_center - current_click_pos);
-                    clicked_on_circle_to_drag = true;
-                    println!("Starting drag for circle at index {}", index);
+            // 1. Check if we clicked on an existing shape to start a drag.
+            for (index, &shape_center) in self.clicked_shapes_positions.iter().enumerate().rev() {
+                // Define the rectangle for hit detection
+                let shape_rect = Rect::new(
+                    shape_center.x - self.shape_width / 2.0,
+                    shape_center.y - self.shape_height / 2.0,
+                    self.shape_width,
+                    self.shape_height,
+                );
 
-                    // If we start dragging, this click should not count towards a double-click
-                    // for creating a new circle. Reset double-click tracking.
+                if shape_rect.contains(current_click_pos) { // Use Rect::contains for hit detection
+                    self.dragged_shape_index = Some(index);
+                    self.drag_offset = Some(shape_center - current_click_pos);
+                    clicked_on_shape_to_drag = true;
+                    println!("Starting drag for shape at index {}", index);
+
                     self.last_click_time = None;
                     self.last_click_pos = None;
-                    break; // Found a circle to drag, no need to check others.
+                    break;
                 }
             }
 
-            // 2. If not dragging an existing circle, handle potential double-click for creation.
-            if !clicked_on_circle_to_drag {
+            // 2. If not dragging, handle potential double-click for creation.
+            if !clicked_on_shape_to_drag {
                 if let (Some(last_time), Some(last_pos)) = (self.last_click_time, self.last_click_pos) {
                     let duration_since_last = current_click_time.duration_since(last_time).as_millis();
                     let distance_from_last = current_click_pos.distance(last_pos);
@@ -146,24 +166,20 @@ impl EventHandler<ggez::GameError> for AppState {
                     if duration_since_last <= DOUBLE_CLICK_MAX_DELAY_MS
                         && distance_from_last <= DOUBLE_CLICK_MAX_DISTANCE
                     {
-                        // This is a double click on empty space!
                         println!(
-                            "Double click on empty space at: ({}, {}) - New circle added.",
+                            "Double click on empty space at: ({}, {}) - New shape added.",
                             current_click_pos.x, current_click_pos.y
                         );
-                        self.clicked_circles_positions.push(current_click_pos);
+                        self.clicked_shapes_positions.push(current_click_pos); // Store center position
 
-                        // Reset last click info after a successful double click.
                         self.last_click_time = None;
                         self.last_click_pos = None;
                     } else {
-                        // Not a double click (too slow or too far), treat as a new first click.
                         self.last_click_time = Some(current_click_time);
                         self.last_click_pos = Some(current_click_pos);
                         println!("Single click on empty space at: ({}, {}) (potential first of double)", x, y);
                     }
                 } else {
-                    // This is the first click (or first after a successful double click/drag).
                     self.last_click_time = Some(current_click_time);
                     self.last_click_pos = Some(current_click_pos);
                     println!("Single click on empty space at: ({}, {}) (potential first of double)", x, y);
@@ -177,18 +193,15 @@ impl EventHandler<ggez::GameError> for AppState {
         &mut self,
         _ctx: &mut Context,
         button: MouseButton,
-        _x: f32, // x and y of mouse_up are not strictly needed for this logic
+        _x: f32,
         _y: f32,
     ) -> GameResult {
         if button == MouseButton::Left {
-            // If a circle was being dragged, "drop" it.
-            if self.dragged_circle_index.is_some() {
-                println!("Dropped circle at: ({:.0}, {:.0})", self.live_mouse_pos.x, self.live_mouse_pos.y);
-                self.dragged_circle_index = None;
+            if self.dragged_shape_index.is_some() {
+                println!("Dropped shape at: ({:.0}, {:.0})", self.live_mouse_pos.x, self.live_mouse_pos.y);
+                self.dragged_shape_index = None;
                 self.drag_offset = None;
             }
-            // Optional: Log mouse release if needed for other purposes.
-            // println!("Left mouse button released at: ({}, {})", x, y);
         }
         Ok(())
     }
@@ -201,16 +214,13 @@ impl EventHandler<ggez::GameError> for AppState {
         _dx: f32,
         _dy: f32,
     ) -> GameResult {
-        self.live_mouse_pos = Vec2::new(x, y); // Always update live mouse position.
+        self.live_mouse_pos = Vec2::new(x, y);
 
-        // If a circle is being dragged, update its position.
-        if let Some(index) = self.dragged_circle_index {
+        if let Some(index) = self.dragged_shape_index {
             if let Some(offset) = self.drag_offset {
-                // Calculate new center based on current mouse position and the stored offset.
                 let new_center = self.live_mouse_pos + offset;
-                // Ensure the index is still valid (it should be, but good practice).
-                if index < self.clicked_circles_positions.len() {
-                    self.clicked_circles_positions[index] = new_center;
+                if index < self.clicked_shapes_positions.len() {
+                    self.clicked_shapes_positions[index] = new_center;
                 }
             }
         }
@@ -220,14 +230,17 @@ impl EventHandler<ggez::GameError> for AppState {
 
 // --- Configuration Loading Function ---
 fn load_config() -> AppConfig {
+    // Updated default configuration for shapes
     let default_config = AppConfig {
         window: WindowConfig {
             width: 800.0,
             height: 600.0,
-            title: "Rust: Drag & Double Click Circles (Default Config)".to_string(),
+            title: "Rust: Drag & Double Click Rounded Rects (Default)".to_string(),
         },
-        circle: CircleConfig {
-            radius: 30.0,
+        shape: ShapeConfig { // Renamed to shape
+            width: 100.0,
+            height: 60.0,
+            corner_radius: 10.0,
             color_r: 100,
             color_g: 200,
             color_b: 255,
@@ -276,7 +289,7 @@ fn load_config() -> AppConfig {
 pub fn main() -> GameResult {
     let config = load_config();
 
-    let (mut ctx, event_loop) = ContextBuilder::new("configurable_circles_app_drag_double_click", "YourName")
+    let (mut ctx, event_loop) = ContextBuilder::new("configurable_rounded_rects_app", "YourName")
         .window_setup(WindowSetup::default().title(&config.window.title))
         .window_mode(
             WindowMode::default()
@@ -285,7 +298,8 @@ pub fn main() -> GameResult {
         )
         .build()?;
 
-    let app_state = AppState::new(&mut ctx, &config.circle)?;
+    // Pass the shape config to AppState::new
+    let app_state = AppState::new(&mut ctx, &config.shape)?;
 
     event::run(ctx, event_loop, app_state)
 }

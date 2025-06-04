@@ -5,9 +5,11 @@ width = 2048.0
 height = 1024.0
 title = "My Configured Circles App!"
 
-[circle]
-radius = 25.0
-color_r = 255 # Red component (0-255)
-color_g = 105 # Green component (0-255)
-color_b = 180 # Blue component (0-255) - A nice pink/purple
+[shape]
+width = 200.0
+height = 60.0
+corner_radius = 10.0
+color_r = 100
+color_g = 200
+color_b = 255
 
