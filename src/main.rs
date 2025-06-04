@@ -56,9 +56,14 @@ const TEXT_PADDING: f32 = 8.0;
 const CONNECTOR_LINE_WIDTH: f32 = 2.0;
 const CONNECTOR_LINE_COLOR: Color = Color::WHITE;
 const SELECTED_CONNECTOR_LINE_COLOR: Color = Color::CYAN;
-const PREVIEW_CONNECTOR_LINE_COLOR: Color = Color::new(0.8, 0.8, 0.8, 0.7); // Semi-transparent white
+const PREVIEW_CONNECTOR_LINE_COLOR: Color = Color::new(0.8, 0.8, 0.8, 0.7);
 const CONNECTOR_CURVE_OFFSET: f32 = 40.0; 
-const CONNECTOR_CIRCLE_RADIUS: f32 = 5.0; // Slightly larger for easier clicking
+
+const CONNECTOR_CIRCLE_DRAW_RADIUS_DEFAULT: f32 = 4.0; // Default small radius
+const CONNECTOR_CIRCLE_DRAW_RADIUS_HOVER: f32 = 8.0;  // Radius when mouse is near
+const CONNECTOR_CIRCLE_CLICK_RADIUS: f32 = 8.0;     // Radius used for click detection (matches hover)
+const CONNECTOR_CIRCLE_HOVER_DETECT_DISTANCE: f32 = 15.0; // How close mouse needs to be to trigger hover
+
 const CONNECTOR_CIRCLE_COLOR: Color = Color::WHITE;
 const SELECTED_CONNECTOR_CIRCLE_COLOR: Color = Color::CYAN;
 const ACTIVE_NEW_LINE_START_CIRCLE_COLOR: Color = Color::GREEN;
@@ -78,9 +83,7 @@ struct ShapeData {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct UserConnection {
     from_shape_index: usize,
-    // from_port_is_outgoing: bool, // True if from bottom-left, false if from top-left
     to_shape_index: usize,
-    // to_port_is_incoming: bool,   // True if to top-left, false if to bottom-left
 }
 
 
@@ -105,12 +108,11 @@ struct AppState {
     editing_shape_index: Option<usize>,
     current_input_text: String,
 
-    connections: Vec<UserConnection>, // Replaces connector_visible
-    selected_connector_index: Option<usize>, // Index into self.connections
+    connections: Vec<UserConnection>, 
+    selected_connector_index: Option<usize>, 
 
-    // State for drawing a new line
     drawing_new_line: bool,
-    new_line_start_info: Option<(usize, bool)>, // (shape_index, is_outgoing_port)
+    new_line_start_info: Option<(usize, bool)>, 
     new_line_preview_end_pos: Option<Vec2>,
 }
 
@@ -213,8 +215,8 @@ impl EventHandler<ggez::GameError> for AppState {
         // --- Draw Existing Connector Lines ---
         for (conn_idx, connection) in self.connections.iter().enumerate() {
             if let (Some(start_point_ggez), Some(end_point_ggez)) = (
-                self.get_connector_point(connection.from_shape_index, true), // Assume from_port is outgoing (bottom-left)
-                self.get_connector_point(connection.to_shape_index, false)    // Assume to_port is incoming (top-left)
+                self.get_connector_point(connection.from_shape_index, true), 
+                self.get_connector_point(connection.to_shape_index, false)    
             ) {
                 let start_point_lyon = LyonPoint::new(start_point_ggez.x, start_point_ggez.y);
                 let end_point_lyon = LyonPoint::new(end_point_ggez.x, end_point_ggez.y);
@@ -278,9 +280,12 @@ impl EventHandler<ggez::GameError> for AppState {
             let rounded_rect_mesh = Mesh::new_rounded_rectangle(ctx, DrawMode::fill(), rect, self.default_shape_corner_radius, self.default_shape_color)?;
             canvas.draw(&rounded_rect_mesh, graphics::DrawParam::default());
 
-            // Determine connector circle colors
+            // Determine connector circle colors and radii
             let mut outgoing_circle_color = CONNECTOR_CIRCLE_COLOR;
             let mut incoming_circle_color = CONNECTOR_CIRCLE_COLOR;
+            let mut outgoing_circle_radius = CONNECTOR_CIRCLE_DRAW_RADIUS_DEFAULT;
+            let mut incoming_circle_radius = CONNECTOR_CIRCLE_DRAW_RADIUS_DEFAULT;
+
 
             if let Some(conn_idx) = self.selected_connector_index {
                 if conn_idx < self.connections.len() {
@@ -296,16 +301,21 @@ impl EventHandler<ggez::GameError> for AppState {
                 }
             }
 
-
-            // Draw "outgoing" connector point (bottom-left)
+            // Check for hover on outgoing point
             if let Some(outgoing_point_ggez) = self.get_connector_point(index, true) {
-                let outgoing_circle_mesh = Mesh::new_circle(ctx, DrawMode::fill(), outgoing_point_ggez, CONNECTOR_CIRCLE_RADIUS, 0.1, outgoing_circle_color)?;
+                if self.live_mouse_pos.distance(outgoing_point_ggez) <= CONNECTOR_CIRCLE_HOVER_DETECT_DISTANCE {
+                    outgoing_circle_radius = CONNECTOR_CIRCLE_DRAW_RADIUS_HOVER;
+                }
+                let outgoing_circle_mesh = Mesh::new_circle(ctx, DrawMode::fill(), outgoing_point_ggez, outgoing_circle_radius, 0.1, outgoing_circle_color)?;
                 canvas.draw(&outgoing_circle_mesh, graphics::DrawParam::default());
             }
 
-            // Draw "incoming" connector point (top-left)
+            // Check for hover on incoming point
             if let Some(incoming_point_ggez) = self.get_connector_point(index, false) {
-                let incoming_circle_mesh = Mesh::new_circle(ctx, DrawMode::fill(), incoming_point_ggez, CONNECTOR_CIRCLE_RADIUS, 0.1, incoming_circle_color)?;
+                 if self.live_mouse_pos.distance(incoming_point_ggez) <= CONNECTOR_CIRCLE_HOVER_DETECT_DISTANCE {
+                    incoming_circle_radius = CONNECTOR_CIRCLE_DRAW_RADIUS_HOVER;
+                }
+                let incoming_circle_mesh = Mesh::new_circle(ctx, DrawMode::fill(), incoming_point_ggez, incoming_circle_radius, 0.1, incoming_circle_color)?;
                 canvas.draw(&incoming_circle_mesh, graphics::DrawParam::default());
             }
 
@@ -367,17 +377,17 @@ impl EventHandler<ggez::GameError> for AppState {
                 let mut connected_to_target = false;
                 if let Some((start_shape_idx, _start_is_outgoing)) = self.new_line_start_info {
                     for (target_idx, _target_shape_data) in self.clicked_shapes.iter().enumerate() {
-                        if target_idx == start_shape_idx { continue; } // Can't connect to self
+                        if target_idx == start_shape_idx { continue; } 
 
-                        if let Some(target_incoming_pos) = self.get_connector_point(target_idx, false) { // Target top-left
-                            if current_click_pos.distance(target_incoming_pos) <= CONNECTOR_CIRCLE_RADIUS {
+                        if let Some(target_incoming_pos) = self.get_connector_point(target_idx, false) { 
+                            if current_click_pos.distance(target_incoming_pos) <= CONNECTOR_CIRCLE_CLICK_RADIUS { // Use CLICK_RADIUS
                                 let new_connection = UserConnection { from_shape_index: start_shape_idx, to_shape_index: target_idx };
                                 if !self.connections.contains(&new_connection) { self.connections.push(new_connection); }
                                 connected_to_target = true; break;
                             }
                         }
-                        if let Some(target_outgoing_pos) = self.get_connector_point(target_idx, true) { // Target bottom-left
-                             if current_click_pos.distance(target_outgoing_pos) <= CONNECTOR_CIRCLE_RADIUS {
+                        if let Some(target_outgoing_pos) = self.get_connector_point(target_idx, true) { 
+                             if current_click_pos.distance(target_outgoing_pos) <= CONNECTOR_CIRCLE_CLICK_RADIUS { // Use CLICK_RADIUS
                                 let new_connection = UserConnection { from_shape_index: start_shape_idx, to_shape_index: target_idx };
                                  if !self.connections.contains(&new_connection) { self.connections.push(new_connection); }
                                 connected_to_target = true; break;
@@ -433,7 +443,7 @@ impl EventHandler<ggez::GameError> for AppState {
             // --- Priority 3: Starting a new line from a connector circle ---
             for (index, _shape_data) in self.clicked_shapes.iter().enumerate() {
                 if let Some(outgoing_pos) = self.get_connector_point(index, true) {
-                    if current_click_pos.distance(outgoing_pos) <= CONNECTOR_CIRCLE_RADIUS {
+                    if current_click_pos.distance(outgoing_pos) <= CONNECTOR_CIRCLE_CLICK_RADIUS { // Use CLICK_RADIUS
                         self.drawing_new_line = true; self.new_line_start_info = Some((index, true));
                         self.selected_shape_index = None; self.selected_connector_index = None;
                         self.last_click_time = None; self.last_click_pos = None;
@@ -441,7 +451,7 @@ impl EventHandler<ggez::GameError> for AppState {
                     }
                 }
                 if let Some(incoming_pos) = self.get_connector_point(index, false) {
-                    if current_click_pos.distance(incoming_pos) <= CONNECTOR_CIRCLE_RADIUS {
+                    if current_click_pos.distance(incoming_pos) <= CONNECTOR_CIRCLE_CLICK_RADIUS { // Use CLICK_RADIUS
                         self.drawing_new_line = true; self.new_line_start_info = Some((index, false));
                         self.selected_shape_index = None; self.selected_connector_index = None;
                         self.last_click_time = None; self.last_click_pos = None;
@@ -476,7 +486,7 @@ impl EventHandler<ggez::GameError> for AppState {
             if let Some(conn_idx) = clicked_on_existing_connector_idx {
                 self.selected_connector_index = Some(conn_idx);
                 self.selected_shape_index = None; 
-                self.editing_shape_index = None; // Finalize text editing
+                self.editing_shape_index = None; 
                 if let Some(editing_idx_val) = self.editing_shape_index.take() {
                      self.clicked_shapes[editing_idx_val].text = if self.current_input_text.is_empty() { None } else { Some(self.current_input_text.clone()) };
                      self.current_input_text.clear();
@@ -487,7 +497,7 @@ impl EventHandler<ggez::GameError> for AppState {
             }
 
             // --- Priority 5: Clicking on empty space ---
-            if let Some(editing_idx_val) = self.editing_shape_index.take() { // Finalize text editing if any
+            if let Some(editing_idx_val) = self.editing_shape_index.take() { 
                 self.clicked_shapes[editing_idx_val].text = if self.current_input_text.is_empty() { None } else { Some(self.current_input_text.clone()) };
                 self.current_input_text.clear();
             }
@@ -504,7 +514,6 @@ impl EventHandler<ggez::GameError> for AppState {
                 let new_idx = self.clicked_shapes.len() - 1;
                 self.selected_shape_index = Some(new_idx); self.editing_shape_index = Some(new_idx);
                 self.current_input_text.clear();
-                // No automatic connection for new shapes now, user must draw them
                 self.last_click_time = None; self.last_click_pos = None;
             } else {
                 self.last_click_time = Some(current_click_time); self.last_click_pos = Some(current_click_pos);
@@ -569,15 +578,14 @@ impl EventHandler<ggez::GameError> for AppState {
                     _ => { if repeated { return Ok(()); } } 
                 }
             } else if let Some(index_to_delete) = self.selected_shape_index { 
-                if keycode == KeyCode::Delete && !repeated {
+                if (keycode == KeyCode::Delete || keycode == KeyCode::Back) && !repeated { 
                     let deleted_shape_idx = index_to_delete;
                     self.clicked_shapes.remove(deleted_shape_idx);
                     
-                    // Remove connections involving the deleted shape and adjust indices of others
                     let mut new_connections = Vec::new();
                     for conn in self.connections.iter() {
                         if conn.from_shape_index == deleted_shape_idx || conn.to_shape_index == deleted_shape_idx {
-                            continue; // Skip this connection
+                            continue; 
                         }
                         let mut new_conn = conn.clone();
                         if conn.from_shape_index > deleted_shape_idx { new_conn.from_shape_index -= 1; }
@@ -595,7 +603,7 @@ impl EventHandler<ggez::GameError> for AppState {
                     println!("Shape {} deleted, connections updated.", deleted_shape_idx);
                 }
             } else if let Some(connector_idx_to_delete) = self.selected_connector_index { 
-                if keycode == KeyCode::Delete && !repeated {
+                if (keycode == KeyCode::Delete || keycode == KeyCode::Back) && !repeated { 
                     if connector_idx_to_delete < self.connections.len() {
                         self.connections.remove(connector_idx_to_delete);
                         println!("Connector {} deleted.", connector_idx_to_delete);
