@@ -55,10 +55,16 @@ const DOUBLE_CLICK_MAX_DISTANCE: f32 = 10.0;
 const TEXT_PADDING: f32 = 8.0;
 const CONNECTOR_LINE_WIDTH: f32 = 2.0;
 const CONNECTOR_LINE_COLOR: Color = Color::WHITE;
+const SELECTED_CONNECTOR_LINE_COLOR: Color = Color::CYAN;
+const PREVIEW_CONNECTOR_LINE_COLOR: Color = Color::new(0.8, 0.8, 0.8, 0.7); // Semi-transparent white
 const CONNECTOR_CURVE_OFFSET: f32 = 40.0; 
-const CONNECTOR_CIRCLE_RADIUS: f32 = 4.0; 
+const CONNECTOR_CIRCLE_RADIUS: f32 = 5.0; // Slightly larger for easier clicking
 const CONNECTOR_CIRCLE_COLOR: Color = Color::WHITE;
+const SELECTED_CONNECTOR_CIRCLE_COLOR: Color = Color::CYAN;
+const ACTIVE_NEW_LINE_START_CIRCLE_COLOR: Color = Color::GREEN;
 const CONNECTOR_POINT_HORIZONTAL_OFFSET: f32 = 15.0;
+const CONNECTOR_SELECTION_RADIUS: f32 = CONNECTOR_LINE_WIDTH * 4.0; 
+const CONNECTOR_SAMPLE_POINTS: usize = 10;
 
 
 // --- Data structure for individual shapes ---
@@ -68,9 +74,19 @@ struct ShapeData {
     text: Option<String>,
 }
 
+// --- Data structure for user-defined connections ---
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct UserConnection {
+    from_shape_index: usize,
+    // from_port_is_outgoing: bool, // True if from bottom-left, false if from top-left
+    to_shape_index: usize,
+    // to_port_is_incoming: bool,   // True if to top-left, false if to bottom-left
+}
+
+
 // --- AppState Struct ---
 struct AppState {
-    live_mouse_pos: Vec2, // This will store logical mouse coordinates
+    live_mouse_pos: Vec2, 
     clicked_shapes: Vec<ShapeData>,
     default_shape_color: Color,
     default_shape_width: f32,
@@ -82,12 +98,20 @@ struct AppState {
     ui_scale: f32, 
 
     last_click_time: Option<Instant>,
-    last_click_pos: Option<Vec2>, // This will store logical click coordinates
+    last_click_pos: Option<Vec2>, 
     selected_shape_index: Option<usize>,
     dragged_shape_index: Option<usize>,
-    drag_offset: Option<Vec2>, // This should be in logical units
+    drag_offset: Option<Vec2>, 
     editing_shape_index: Option<usize>,
     current_input_text: String,
+
+    connections: Vec<UserConnection>, // Replaces connector_visible
+    selected_connector_index: Option<usize>, // Index into self.connections
+
+    // State for drawing a new line
+    drawing_new_line: bool,
+    new_line_start_info: Option<(usize, bool)>, // (shape_index, is_outgoing_port)
+    new_line_preview_end_pos: Option<Vec2>,
 }
 
 impl AppState {
@@ -131,13 +155,50 @@ impl AppState {
             drag_offset: None,
             editing_shape_index: None,
             current_input_text: String::new(),
+            connections: Vec::new(), 
+            selected_connector_index: None, 
+            drawing_new_line: false,
+            new_line_start_info: None,
+            new_line_preview_end_pos: None,
         })
     }
+
+    // Helper to get connector point coordinates
+    fn get_connector_point(&self, shape_index: usize, is_outgoing: bool) -> Option<Vec2> {
+        if shape_index < self.clicked_shapes.len() {
+            let shape_data = &self.clicked_shapes[shape_index];
+            let x_base = shape_data.center_position.x - self.default_shape_width / 2.0;
+            let y_base = shape_data.center_position.y;
+            if is_outgoing { // Bottom-left
+                Some(Vec2::new(x_base + CONNECTOR_POINT_HORIZONTAL_OFFSET, y_base + self.default_shape_height / 2.0))
+            } else { // Top-left
+                Some(Vec2::new(x_base + CONNECTOR_POINT_HORIZONTAL_OFFSET, y_base - self.default_shape_height / 2.0))
+            }
+        } else {
+            None
+        }
+    }
 }
+
+// Helper function to get a point on a cubic Bezier curve
+fn get_point_on_cubic_bezier(p0: LyonPoint, p1: LyonPoint, p2: LyonPoint, p3: LyonPoint, t: f32) -> LyonPoint {
+    let t_inv = 1.0 - t;
+    let t_inv_sq = t_inv * t_inv;
+    let t_inv_cub = t_inv_sq * t_inv;
+    let t_sq = t * t;
+    let t_cub = t_sq * t;
+    let x = t_inv_cub * p0.x + 3.0 * t_inv_sq * t * p1.x + 3.0 * t_inv * t_sq * p2.x + t_cub * p3.x;
+    let y = t_inv_cub * p0.y + 3.0 * t_inv_sq * t * p1.y + 3.0 * t_inv * t_sq * p2.y + t_cub * p3.y;
+    LyonPoint::new(x, y)
+}
+
 
 // --- EventHandler Implementation ---
 impl EventHandler<ggez::GameError> for AppState {
     fn update(&mut self, _ctx: &mut Context) -> GameResult {
+        if self.drawing_new_line {
+            self.new_line_preview_end_pos = Some(self.live_mouse_pos);
+        }
         Ok(())
     }
 
@@ -149,20 +210,14 @@ impl EventHandler<ggez::GameError> for AppState {
         let logical_height = physical_height / self.ui_scale;
         canvas.set_screen_coordinates(Rect::new(0.0, 0.0, logical_width, logical_height));
 
-        if self.clicked_shapes.len() > 1 {
-            for i in 0..(self.clicked_shapes.len() - 1) {
-                let shape1_data = &self.clicked_shapes[i];
-                let shape2_data = &self.clicked_shapes[i + 1];
-
-                let start_x_f32 = (shape1_data.center_position.x - self.default_shape_width / 2.0) + CONNECTOR_POINT_HORIZONTAL_OFFSET;
-                let start_y_f32 = shape1_data.center_position.y + self.default_shape_height / 2.0;
-                let start_point_lyon = LyonPoint::new(start_x_f32, start_y_f32); 
-                let start_point_ggez = Vec2::new(start_x_f32, start_y_f32); 
-
-                let end_x_f32 = (shape2_data.center_position.x - self.default_shape_width / 2.0) + CONNECTOR_POINT_HORIZONTAL_OFFSET;
-                let end_y_f32 = shape2_data.center_position.y - self.default_shape_height / 2.0;
-                let end_point_lyon = LyonPoint::new(end_x_f32, end_y_f32); 
-                let end_point_ggez = Vec2::new(end_x_f32, end_y_f32); 
+        // --- Draw Existing Connector Lines ---
+        for (conn_idx, connection) in self.connections.iter().enumerate() {
+            if let (Some(start_point_ggez), Some(end_point_ggez)) = (
+                self.get_connector_point(connection.from_shape_index, true), // Assume from_port is outgoing (bottom-left)
+                self.get_connector_point(connection.to_shape_index, false)    // Assume to_port is incoming (top-left)
+            ) {
+                let start_point_lyon = LyonPoint::new(start_point_ggez.x, start_point_ggez.y);
+                let end_point_lyon = LyonPoint::new(end_point_ggez.x, end_point_ggez.y);
 
                 let direction_multiplier = if end_point_lyon.x > start_point_lyon.x { 1.0 } else { -1.0 };
                 let cp1 = LyonPoint::new(start_point_lyon.x + CONNECTOR_CURVE_OFFSET * direction_multiplier, start_point_lyon.y);
@@ -174,44 +229,45 @@ impl EventHandler<ggez::GameError> for AppState {
                 path_builder.end(false); 
                 let lyon_path = path_builder.build();
 
+                let current_line_color = if self.selected_connector_index == Some(conn_idx) {
+                    SELECTED_CONNECTOR_LINE_COLOR
+                } else {
+                    CONNECTOR_LINE_COLOR
+                };
+                
                 let mut geometry: VertexBuffers<Vertex, u32> = VertexBuffers::new();
                 let mut stroke_tess = StrokeTessellator::new();
                 let stroke_options = StrokeOptions::default().with_line_width(CONNECTOR_LINE_WIDTH);
                 let line_color_arr = [
-                    CONNECTOR_LINE_COLOR.r,
-                    CONNECTOR_LINE_COLOR.g,
-                    CONNECTOR_LINE_COLOR.b,
-                    CONNECTOR_LINE_COLOR.a,
+                    current_line_color.r, current_line_color.g, current_line_color.b, current_line_color.a,
                 ];
 
-                stroke_tess.tessellate_path(
-                    &lyon_path,
-                    &stroke_options,
+                stroke_tess.tessellate_path( &lyon_path, &stroke_options,
                     &mut BuffersBuilder::new(&mut geometry, |vertex: StrokeVertex| {
-                        Vertex {
-                            position: [vertex.position().x, vertex.position().y],
-                            uv: [0.0, 0.0], 
-                            color: line_color_arr,
-                        }
+                        Vertex { position: [vertex.position().x, vertex.position().y], uv: [0.0, 0.0], color: line_color_arr, }
                     }),
                 ).unwrap_or_else(|e| {println!("Lyon tessellation error: {:?}", e);});
 
                 if !geometry.vertices.is_empty() && !geometry.indices.is_empty() {
-                    let mesh_data = MeshData {
-                        vertices: &geometry.vertices, 
-                        indices: &geometry.indices,   
-                    };
+                    let mesh_data = MeshData { vertices: &geometry.vertices, indices: &geometry.indices };
                     let line_mesh = Mesh::from_data(ctx, mesh_data); 
                     canvas.draw(&line_mesh, graphics::DrawParam::default());
-
-                    let start_circle_mesh = Mesh::new_circle(ctx, DrawMode::fill(), start_point_ggez, CONNECTOR_CIRCLE_RADIUS, 0.1, CONNECTOR_CIRCLE_COLOR)?;
-                    canvas.draw(&start_circle_mesh, graphics::DrawParam::default());
-                    let end_circle_mesh = Mesh::new_circle(ctx, DrawMode::fill(), end_point_ggez, CONNECTOR_CIRCLE_RADIUS, 0.1, CONNECTOR_CIRCLE_COLOR)?;
-                    canvas.draw(&end_circle_mesh, graphics::DrawParam::default());
+                }
+            }
+        }
+        
+        // --- Draw Preview Connector Line ---
+        if self.drawing_new_line {
+            if let (Some((start_shape_idx, start_is_outgoing)), Some(preview_end_pos)) = (self.new_line_start_info, self.new_line_preview_end_pos) {
+                if let Some(start_pos) = self.get_connector_point(start_shape_idx, start_is_outgoing) {
+                     let line_preview_mesh = Mesh::new_line(ctx, &[start_pos, preview_end_pos], CONNECTOR_LINE_WIDTH / 2.0, PREVIEW_CONNECTOR_LINE_COLOR)?;
+                     canvas.draw(&line_preview_mesh, graphics::DrawParam::default());
                 }
             }
         }
 
+
+        // --- Draw Shapes, Outlines, Text, and Connector Points on Shapes ---
         for (index, shape_data) in self.clicked_shapes.iter().enumerate() {
             let rect = Rect::new(
                 shape_data.center_position.x - self.default_shape_width / 2.0,
@@ -219,9 +275,40 @@ impl EventHandler<ggez::GameError> for AppState {
                 self.default_shape_width,
                 self.default_shape_height,
             );
-            let shape_color_to_draw = self.default_shape_color;
-            let rounded_rect_mesh = Mesh::new_rounded_rectangle(ctx, DrawMode::fill(), rect, self.default_shape_corner_radius, shape_color_to_draw)?;
+            let rounded_rect_mesh = Mesh::new_rounded_rectangle(ctx, DrawMode::fill(), rect, self.default_shape_corner_radius, self.default_shape_color)?;
             canvas.draw(&rounded_rect_mesh, graphics::DrawParam::default());
+
+            // Determine connector circle colors
+            let mut outgoing_circle_color = CONNECTOR_CIRCLE_COLOR;
+            let mut incoming_circle_color = CONNECTOR_CIRCLE_COLOR;
+
+            if let Some(conn_idx) = self.selected_connector_index {
+                if conn_idx < self.connections.len() {
+                    let selected_conn = &self.connections[conn_idx];
+                    if selected_conn.from_shape_index == index { outgoing_circle_color = SELECTED_CONNECTOR_CIRCLE_COLOR; }
+                    if selected_conn.to_shape_index == index { incoming_circle_color = SELECTED_CONNECTOR_CIRCLE_COLOR; }
+                }
+            }
+            if let Some((start_idx, is_out)) = self.new_line_start_info {
+                if start_idx == index {
+                    if is_out { outgoing_circle_color = ACTIVE_NEW_LINE_START_CIRCLE_COLOR; }
+                    else { incoming_circle_color = ACTIVE_NEW_LINE_START_CIRCLE_COLOR; }
+                }
+            }
+
+
+            // Draw "outgoing" connector point (bottom-left)
+            if let Some(outgoing_point_ggez) = self.get_connector_point(index, true) {
+                let outgoing_circle_mesh = Mesh::new_circle(ctx, DrawMode::fill(), outgoing_point_ggez, CONNECTOR_CIRCLE_RADIUS, 0.1, outgoing_circle_color)?;
+                canvas.draw(&outgoing_circle_mesh, graphics::DrawParam::default());
+            }
+
+            // Draw "incoming" connector point (top-left)
+            if let Some(incoming_point_ggez) = self.get_connector_point(index, false) {
+                let incoming_circle_mesh = Mesh::new_circle(ctx, DrawMode::fill(), incoming_point_ggez, CONNECTOR_CIRCLE_RADIUS, 0.1, incoming_circle_color)?;
+                canvas.draw(&incoming_circle_mesh, graphics::DrawParam::default());
+            }
+
 
             if self.selected_shape_index == Some(index) && self.editing_shape_index != Some(index) {
                 let center_x = rect.x + rect.w / 2.0;
@@ -251,12 +338,14 @@ impl EventHandler<ggez::GameError> for AppState {
         }
 
         let status_text = format!(
-            "Mouse: {:.0}, {:.0} | Shapes: {} {}{}",
+            "Mouse: {:.0}, {:.0} | Shapes: {} {}{}{}{}", 
             self.live_mouse_pos.x, 
             self.live_mouse_pos.y,
             self.clicked_shapes.len(),
-            if self.editing_shape_index.is_some() { "[EDITING]" } else { "" },
-            if self.selected_shape_index.is_some() && self.editing_shape_index.is_none() { "[SELECTED]" } else { "" }
+            if self.editing_shape_index.is_some() { "[EDITING SHAPE]" } else { "" },
+            if self.selected_shape_index.is_some() && self.editing_shape_index.is_none() { "[SHAPE SELECTED]" } else { "" },
+            if self.selected_connector_index.is_some() { "[CONN SELECTED]" } else { "" },
+            if self.drawing_new_line { "[DRAWING LINE]" } else { "" }
         );
         let mut text_display = graphics::Text::new(status_text);
         text_display.set_scale(20.0); 
@@ -267,29 +356,55 @@ impl EventHandler<ggez::GameError> for AppState {
     }
 
     fn mouse_button_down_event(&mut self, _ctx: &mut Context, button: MouseButton, x: f32, y: f32) -> GameResult {
-        // Manually scale physical mouse coordinates to logical coordinates
         let logical_x = x / self.ui_scale;
         let logical_y = y / self.ui_scale;
+        let current_click_pos = Vec2::new(logical_x, logical_y);
+        let current_click_time = Instant::now();
 
         if button == MouseButton::Left {
-            let current_click_time = Instant::now();
-            let current_click_pos = Vec2::new(logical_x, logical_y); // Use logical coordinates
-            let mut clicked_on_shape_details: Option<(usize, Vec2)> = None;
+            // --- Priority 1: Completing a new line ---
+            if self.drawing_new_line {
+                let mut connected_to_target = false;
+                if let Some((start_shape_idx, _start_is_outgoing)) = self.new_line_start_info {
+                    for (target_idx, _target_shape_data) in self.clicked_shapes.iter().enumerate() {
+                        if target_idx == start_shape_idx { continue; } // Can't connect to self
 
+                        if let Some(target_incoming_pos) = self.get_connector_point(target_idx, false) { // Target top-left
+                            if current_click_pos.distance(target_incoming_pos) <= CONNECTOR_CIRCLE_RADIUS {
+                                let new_connection = UserConnection { from_shape_index: start_shape_idx, to_shape_index: target_idx };
+                                if !self.connections.contains(&new_connection) { self.connections.push(new_connection); }
+                                connected_to_target = true; break;
+                            }
+                        }
+                        if let Some(target_outgoing_pos) = self.get_connector_point(target_idx, true) { // Target bottom-left
+                             if current_click_pos.distance(target_outgoing_pos) <= CONNECTOR_CIRCLE_RADIUS {
+                                let new_connection = UserConnection { from_shape_index: start_shape_idx, to_shape_index: target_idx };
+                                 if !self.connections.contains(&new_connection) { self.connections.push(new_connection); }
+                                connected_to_target = true; break;
+                            }
+                        }
+                    }
+                }
+                self.drawing_new_line = false; self.new_line_start_info = None; self.new_line_preview_end_pos = None;
+                if !connected_to_target { println!("New line drawing cancelled."); }
+                return Ok(());
+            }
+
+            // --- Priority 2: Interacting with a shape body ---
+            let mut clicked_on_shape_body_details: Option<(usize, Vec2)> = None;
             for (index, shape_data) in self.clicked_shapes.iter().enumerate().rev() {
                 let shape_rect = Rect::new(
                     shape_data.center_position.x - self.default_shape_width / 2.0,
                     shape_data.center_position.y - self.default_shape_height / 2.0,
-                    self.default_shape_width,
-                    self.default_shape_height,
-                );
-                if shape_rect.contains(current_click_pos) { // current_click_pos is now logical
-                    clicked_on_shape_details = Some((index, shape_data.center_position));
+                    self.default_shape_width, self.default_shape_height);
+                if shape_rect.contains(current_click_pos) {
+                    clicked_on_shape_body_details = Some((index, shape_data.center_position));
                     break;
                 }
             }
 
-            if let Some((clicked_idx, clicked_shape_center)) = clicked_on_shape_details {
+            if let Some((clicked_idx, clicked_shape_center)) = clicked_on_shape_body_details {
+                self.selected_connector_index = None;
                 if self.editing_shape_index.is_some() && self.editing_shape_index != Some(clicked_idx) {
                     if let Some(editing_idx_val) = self.editing_shape_index.take() {
                         self.clicked_shapes[editing_idx_val].text = if self.current_input_text.is_empty() { None } else { Some(self.current_input_text.clone()) };
@@ -298,52 +413,101 @@ impl EventHandler<ggez::GameError> for AppState {
                 }
                 self.selected_shape_index = Some(clicked_idx);
                 let mut is_double_click_for_edit = false;
-                if let (Some(last_time), Some(last_pos_val)) = (self.last_click_time, self.last_click_pos) { // Renamed last_pos to last_pos_val
-                    // last_pos_val is already logical, current_click_pos is now logical
-                    if current_click_time.duration_since(last_time).as_millis() <= DOUBLE_CLICK_MAX_DELAY_MS && current_click_pos.distance(last_pos_val) <= DOUBLE_CLICK_MAX_DISTANCE { // Use last_pos_val
+                if let (Some(last_time), Some(last_pos_val)) = (self.last_click_time, self.last_click_pos) {
+                    if current_click_time.duration_since(last_time).as_millis() <= DOUBLE_CLICK_MAX_DELAY_MS && current_click_pos.distance(last_pos_val) <= DOUBLE_CLICK_MAX_DISTANCE {
                         is_double_click_for_edit = true;
                     }
                 }
                 if is_double_click_for_edit {
                     self.editing_shape_index = Some(clicked_idx);
                     self.current_input_text = self.clicked_shapes[clicked_idx].text.clone().unwrap_or_default();
-                    self.dragged_shape_index = None;
-                    self.last_click_time = None;
-                    self.last_click_pos = None;
+                    self.dragged_shape_index = None; self.last_click_time = None; self.last_click_pos = None;
                 } else {
                     self.dragged_shape_index = Some(clicked_idx);
-                    // drag_offset should be calculated using logical coordinates
                     self.drag_offset = Some(clicked_shape_center - current_click_pos);
-                    self.last_click_time = Some(current_click_time);
-                    self.last_click_pos = Some(current_click_pos); // Store logical position
+                    self.last_click_time = Some(current_click_time); self.last_click_pos = Some(current_click_pos);
                 }
-            } else {
-                if let Some(editing_idx_val) = self.editing_shape_index.take() {
-                    self.clicked_shapes[editing_idx_val].text = if self.current_input_text.is_empty() { None } else { Some(self.current_input_text.clone()) };
-                    self.current_input_text.clear();
-                }
-                self.selected_shape_index = None;
-                self.dragged_shape_index = None;
-                let mut is_double_click_for_create = false;
-                if let (Some(last_time), Some(last_pos_val)) = (self.last_click_time, self.last_click_pos) { // Renamed last_pos to last_pos_val
-                     // last_pos_val is already logical, current_click_pos is now logical
-                    if current_click_time.duration_since(last_time).as_millis() <= DOUBLE_CLICK_MAX_DELAY_MS && current_click_pos.distance(last_pos_val) <= DOUBLE_CLICK_MAX_DISTANCE { // Use last_pos_val
-                        is_double_click_for_create = true;
+                return Ok(());
+            }
+            
+            // --- Priority 3: Starting a new line from a connector circle ---
+            for (index, _shape_data) in self.clicked_shapes.iter().enumerate() {
+                if let Some(outgoing_pos) = self.get_connector_point(index, true) {
+                    if current_click_pos.distance(outgoing_pos) <= CONNECTOR_CIRCLE_RADIUS {
+                        self.drawing_new_line = true; self.new_line_start_info = Some((index, true));
+                        self.selected_shape_index = None; self.selected_connector_index = None;
+                        self.last_click_time = None; self.last_click_pos = None;
+                        println!("Starting new line from shape {} (outgoing).", index); return Ok(());
                     }
                 }
-                if is_double_click_for_create {
-                    // current_click_pos is already logical
-                    self.clicked_shapes.push(ShapeData { center_position: current_click_pos, text: None });
-                    let new_idx = self.clicked_shapes.len() - 1;
-                    self.selected_shape_index = Some(new_idx);
-                    self.editing_shape_index = Some(new_idx);
-                    self.current_input_text.clear();
-                    self.last_click_time = None;
-                    self.last_click_pos = None;
-                } else {
-                    self.last_click_time = Some(current_click_time);
-                    self.last_click_pos = Some(current_click_pos); // Store logical position
+                if let Some(incoming_pos) = self.get_connector_point(index, false) {
+                    if current_click_pos.distance(incoming_pos) <= CONNECTOR_CIRCLE_RADIUS {
+                        self.drawing_new_line = true; self.new_line_start_info = Some((index, false));
+                        self.selected_shape_index = None; self.selected_connector_index = None;
+                        self.last_click_time = None; self.last_click_pos = None;
+                        println!("Starting new line from shape {} (incoming).", index); return Ok(());
+                    }
                 }
+            }
+
+            // --- Priority 4: Selecting an existing connector line ---
+            let mut clicked_on_existing_connector_idx: Option<usize> = None;
+            for (conn_idx, connection) in self.connections.iter().enumerate() {
+                 if let (Some(start_point_ggez), Some(end_point_ggez)) = (
+                    self.get_connector_point(connection.from_shape_index, true),
+                    self.get_connector_point(connection.to_shape_index, false)
+                ) {
+                    let p0 = LyonPoint::new(start_point_ggez.x, start_point_ggez.y);
+                    let p3 = LyonPoint::new(end_point_ggez.x, end_point_ggez.y);
+                    let dir_mult = if p3.x > p0.x { 1.0 } else { -1.0 };
+                    let p1 = LyonPoint::new(p0.x + CONNECTOR_CURVE_OFFSET * dir_mult, p0.y);
+                    let p2 = LyonPoint::new(p3.x - CONNECTOR_CURVE_OFFSET * dir_mult, p3.y);
+                    for j in 0..=CONNECTOR_SAMPLE_POINTS {
+                        let t = j as f32 / CONNECTOR_SAMPLE_POINTS as f32;
+                        let curve_point = get_point_on_cubic_bezier(p0, p1, p2, p3, t);
+                        if current_click_pos.distance(Vec2::new(curve_point.x, curve_point.y)) <= CONNECTOR_SELECTION_RADIUS {
+                            clicked_on_existing_connector_idx = Some(conn_idx); break;
+                        }
+                    }
+                }
+                if clicked_on_existing_connector_idx.is_some() { break; }
+            }
+
+            if let Some(conn_idx) = clicked_on_existing_connector_idx {
+                self.selected_connector_index = Some(conn_idx);
+                self.selected_shape_index = None; 
+                self.editing_shape_index = None; // Finalize text editing
+                if let Some(editing_idx_val) = self.editing_shape_index.take() {
+                     self.clicked_shapes[editing_idx_val].text = if self.current_input_text.is_empty() { None } else { Some(self.current_input_text.clone()) };
+                     self.current_input_text.clear();
+                }
+                println!("Connector {} selected.", conn_idx);
+                self.last_click_time = Some(current_click_time); self.last_click_pos = Some(current_click_pos);
+                return Ok(());
+            }
+
+            // --- Priority 5: Clicking on empty space ---
+            if let Some(editing_idx_val) = self.editing_shape_index.take() { // Finalize text editing if any
+                self.clicked_shapes[editing_idx_val].text = if self.current_input_text.is_empty() { None } else { Some(self.current_input_text.clone()) };
+                self.current_input_text.clear();
+            }
+            self.selected_shape_index = None; self.dragged_shape_index = None; self.selected_connector_index = None;
+
+            let mut is_double_click_for_create = false;
+            if let (Some(last_time), Some(last_pos_val)) = (self.last_click_time, self.last_click_pos) {
+                if current_click_time.duration_since(last_time).as_millis() <= DOUBLE_CLICK_MAX_DELAY_MS && current_click_pos.distance(last_pos_val) <= DOUBLE_CLICK_MAX_DISTANCE {
+                    is_double_click_for_create = true;
+                }
+            }
+            if is_double_click_for_create {
+                self.clicked_shapes.push(ShapeData { center_position: current_click_pos, text: None });
+                let new_idx = self.clicked_shapes.len() - 1;
+                self.selected_shape_index = Some(new_idx); self.editing_shape_index = Some(new_idx);
+                self.current_input_text.clear();
+                // No automatic connection for new shapes now, user must draw them
+                self.last_click_time = None; self.last_click_pos = None;
+            } else {
+                self.last_click_time = Some(current_click_time); self.last_click_pos = Some(current_click_pos);
             }
         }
         Ok(())
@@ -358,16 +522,12 @@ impl EventHandler<ggez::GameError> for AppState {
     }
 
     fn mouse_motion_event(&mut self, _ctx: &mut Context, x: f32, y: f32, _dx: f32, _dy: f32) -> GameResult {
-        // Manually scale physical mouse coordinates to logical coordinates
         let logical_x = x / self.ui_scale;
         let logical_y = y / self.ui_scale;
-        
-        self.live_mouse_pos = Vec2::new(logical_x, logical_y); // Store logical coordinates
-
+        self.live_mouse_pos = Vec2::new(logical_x, logical_y);
         if let Some(index) = self.dragged_shape_index {
-            if let Some(offset) = self.drag_offset { // offset is already logical
+            if let Some(offset) = self.drag_offset {
                 if index < self.clicked_shapes.len() {
-                    // live_mouse_pos is now logical, offset is logical
                     self.clicked_shapes[index].center_position = self.live_mouse_pos + offset;
                 }
             }
@@ -384,33 +544,63 @@ impl EventHandler<ggez::GameError> for AppState {
 
     fn key_down_event(&mut self, _ctx: &mut Context, input: KeyInput, repeated: bool) -> GameResult {
         if let Some(keycode) = input.keycode {
-            if self.editing_shape_index.is_some() {
+            if self.drawing_new_line && keycode == KeyCode::Escape && !repeated {
+                self.drawing_new_line = false; self.new_line_start_info = None; self.new_line_preview_end_pos = None;
+                println!("New line drawing cancelled by Escape.");
+                return Ok(());
+            }
+
+            if self.editing_shape_index.is_some() { 
                 match keycode {
                     KeyCode::Return | KeyCode::NumpadEnter => {
                         if repeated { return Ok(()); }
                         if let Some(index) = self.editing_shape_index.take() {
                             self.clicked_shapes[index].text = if self.current_input_text.is_empty() { None } else { Some(self.current_input_text.clone()) };
                             self.current_input_text.clear();
-                            self.selected_shape_index = Some(index);
+                            self.selected_shape_index = Some(index); 
                         }
                     }
                     KeyCode::Escape => {
                         if repeated { return Ok(()); }
-                        self.editing_shape_index = None;
+                        self.editing_shape_index = None; 
                         self.current_input_text.clear();
                     }
                     KeyCode::Back => { self.current_input_text.pop(); }
-                    KeyCode::Delete => {} 
-                    _ => { if repeated { return Ok(()); } }
+                    _ => { if repeated { return Ok(()); } } 
                 }
-            } else if let Some(index_to_delete) = self.selected_shape_index {
+            } else if let Some(index_to_delete) = self.selected_shape_index { 
                 if keycode == KeyCode::Delete && !repeated {
-                    self.clicked_shapes.remove(index_to_delete);
+                    let deleted_shape_idx = index_to_delete;
+                    self.clicked_shapes.remove(deleted_shape_idx);
+                    
+                    // Remove connections involving the deleted shape and adjust indices of others
+                    let mut new_connections = Vec::new();
+                    for conn in self.connections.iter() {
+                        if conn.from_shape_index == deleted_shape_idx || conn.to_shape_index == deleted_shape_idx {
+                            continue; // Skip this connection
+                        }
+                        let mut new_conn = conn.clone();
+                        if conn.from_shape_index > deleted_shape_idx { new_conn.from_shape_index -= 1; }
+                        if conn.to_shape_index > deleted_shape_idx { new_conn.to_shape_index -= 1; }
+                        new_connections.push(new_conn);
+                    }
+                    self.connections = new_connections;
+
                     self.selected_shape_index = None;
-                    self.dragged_shape_index = None;
-                    self.editing_shape_index = None;
-                    self.last_click_time = None;
+                    self.dragged_shape_index = None; 
+                    self.editing_shape_index = None; 
+                    self.selected_connector_index = None; 
+                    self.last_click_time = None; 
                     self.last_click_pos = None;
+                    println!("Shape {} deleted, connections updated.", deleted_shape_idx);
+                }
+            } else if let Some(connector_idx_to_delete) = self.selected_connector_index { 
+                if keycode == KeyCode::Delete && !repeated {
+                    if connector_idx_to_delete < self.connections.len() {
+                        self.connections.remove(connector_idx_to_delete);
+                        println!("Connector {} deleted.", connector_idx_to_delete);
+                    }
+                    self.selected_connector_index = None;
                 }
             }
         }
@@ -423,7 +613,7 @@ fn load_config() -> AppConfig {
         window: WindowConfig {
             width: 800.0,
             height: 600.0,
-            title: "Rust: Shapes - UI Scale (Default)".to_string(), 
+            title: "Rust: Shapes - User Lines (Default)".to_string(), 
             msaa_level: None, 
             ui_scale_factor: None, 
         },
@@ -488,7 +678,7 @@ pub fn main() -> GameResult {
     println!("Using MSAA level: {:?}", msaa);
 
 
-    let (mut ctx, event_loop) = ContextBuilder::new("shapes_app_ui_scale", "YourName")
+    let (mut ctx, event_loop) = ContextBuilder::new("shapes_app_user_lines", "YourName")
         .window_setup(
             WindowSetup::default()
                 .title(&app_config.window.title)
