@@ -5,6 +5,7 @@ width = 1024.0
 height = 768.0
 title = "vrun"
 msaa_level = 4 # Optional: Anti-aliasing samples. Use 1 (off) or 4 (on). Defaults to 4 if omitted or invalid.
+ui_scale_factor = 2.0 # Optional: Make UI elements appear larger, use for high dpi screens like Apple Retna
 
 [shape]
 width = 120.0

@@ -26,6 +26,7 @@ struct WindowConfig {
     height: f32,
     title: String,
     msaa_level: Option<u8>, 
+    ui_scale_factor: Option<f32>, 
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -57,7 +58,7 @@ const CONNECTOR_LINE_COLOR: Color = Color::WHITE;
 const CONNECTOR_CURVE_OFFSET: f32 = 40.0; 
 const CONNECTOR_CIRCLE_RADIUS: f32 = 4.0; 
 const CONNECTOR_CIRCLE_COLOR: Color = Color::WHITE;
-const CONNECTOR_POINT_HORIZONTAL_OFFSET: f32 = 15.0; // Offset for line connection points from the left edge
+const CONNECTOR_POINT_HORIZONTAL_OFFSET: f32 = 15.0;
 
 
 // --- Data structure for individual shapes ---
@@ -69,7 +70,7 @@ struct ShapeData {
 
 // --- AppState Struct ---
 struct AppState {
-    live_mouse_pos: Vec2,
+    live_mouse_pos: Vec2, // This will store logical mouse coordinates
     clicked_shapes: Vec<ShapeData>,
     default_shape_color: Color,
     default_shape_width: f32,
@@ -77,22 +78,37 @@ struct AppState {
     default_shape_corner_radius: f32,
     selection_outline_color: Color,
     selection_outline_width: f32,
+    
+    ui_scale: f32, 
+
     last_click_time: Option<Instant>,
-    last_click_pos: Option<Vec2>,
+    last_click_pos: Option<Vec2>, // This will store logical click coordinates
     selected_shape_index: Option<usize>,
     dragged_shape_index: Option<usize>,
-    drag_offset: Option<Vec2>,
+    drag_offset: Option<Vec2>, // This should be in logical units
     editing_shape_index: Option<usize>,
     current_input_text: String,
 }
 
 impl AppState {
-    fn new(_ctx: &mut Context, shape_config: &ShapeConfig) -> GameResult<AppState> {
+    fn new(_ctx: &mut Context, app_config: &AppConfig) -> GameResult<AppState> {
+        let shape_config = &app_config.shape;
+
         let sel_color_r = shape_config.selection_outline_color_r.unwrap_or(255);
         let sel_color_g = shape_config.selection_outline_color_g.unwrap_or(255);
         let sel_color_b = shape_config.selection_outline_color_b.unwrap_or(0);
         let selection_outline_color = Color::from_rgb(sel_color_r, sel_color_g, sel_color_b);
         let selection_outline_width = shape_config.selection_outline_width.unwrap_or(2.0);
+
+        let ui_scale = match app_config.window.ui_scale_factor {
+            Some(factor) if factor > 0.0 => factor,
+            Some(_) => {
+                println!("Warning: Invalid ui_scale_factor in config.toml. Must be > 0. Defaulting to 1.0.");
+                1.0
+            }
+            None => 1.0,
+        };
+        println!("Using UI Scale Factor: {}", ui_scale);
 
         Ok(AppState {
             live_mouse_pos: Vec2::new(0.0, 0.0),
@@ -107,6 +123,7 @@ impl AppState {
             default_shape_corner_radius: shape_config.corner_radius,
             selection_outline_color,
             selection_outline_width,
+            ui_scale, 
             last_click_time: None,
             last_click_pos: None,
             selected_shape_index: None,
@@ -127,30 +144,29 @@ impl EventHandler<ggez::GameError> for AppState {
     fn draw(&mut self, ctx: &mut Context) -> GameResult {
         let mut canvas = graphics::Canvas::from_frame(ctx, graphics::Color::from_rgb(30, 30, 40));
 
-        // --- Draw Connector Lines and Circles ---
+        let (physical_width, physical_height) = ctx.gfx.drawable_size();
+        let logical_width = physical_width / self.ui_scale;
+        let logical_height = physical_height / self.ui_scale;
+        canvas.set_screen_coordinates(Rect::new(0.0, 0.0, logical_width, logical_height));
+
         if self.clicked_shapes.len() > 1 {
             for i in 0..(self.clicked_shapes.len() - 1) {
                 let shape1_data = &self.clicked_shapes[i];
                 let shape2_data = &self.clicked_shapes[i + 1];
 
-                // Calculate bottom-left of shape1, with horizontal offset
                 let start_x_f32 = (shape1_data.center_position.x - self.default_shape_width / 2.0) + CONNECTOR_POINT_HORIZONTAL_OFFSET;
                 let start_y_f32 = shape1_data.center_position.y + self.default_shape_height / 2.0;
                 let start_point_lyon = LyonPoint::new(start_x_f32, start_y_f32); 
                 let start_point_ggez = Vec2::new(start_x_f32, start_y_f32); 
 
-                // Calculate top-left of shape2, with horizontal offset
                 let end_x_f32 = (shape2_data.center_position.x - self.default_shape_width / 2.0) + CONNECTOR_POINT_HORIZONTAL_OFFSET;
                 let end_y_f32 = shape2_data.center_position.y - self.default_shape_height / 2.0;
                 let end_point_lyon = LyonPoint::new(end_x_f32, end_y_f32); 
                 let end_point_ggez = Vec2::new(end_x_f32, end_y_f32); 
 
-
                 let direction_multiplier = if end_point_lyon.x > start_point_lyon.x { 1.0 } else { -1.0 };
-                // Adjust control points to originate from the new offset start/end points
                 let cp1 = LyonPoint::new(start_point_lyon.x + CONNECTOR_CURVE_OFFSET * direction_multiplier, start_point_lyon.y);
                 let cp2 = LyonPoint::new(end_point_lyon.x - CONNECTOR_CURVE_OFFSET * direction_multiplier, end_point_lyon.y);
-
 
                 let mut path_builder = LyonPathBuilder::new();
                 path_builder.begin(start_point_lyon);
@@ -180,7 +196,6 @@ impl EventHandler<ggez::GameError> for AppState {
                     }),
                 ).unwrap_or_else(|e| {println!("Lyon tessellation error: {:?}", e);});
 
-
                 if !geometry.vertices.is_empty() && !geometry.indices.is_empty() {
                     let mesh_data = MeshData {
                         vertices: &geometry.vertices, 
@@ -189,31 +204,14 @@ impl EventHandler<ggez::GameError> for AppState {
                     let line_mesh = Mesh::from_data(ctx, mesh_data); 
                     canvas.draw(&line_mesh, graphics::DrawParam::default());
 
-                    // Draw small circles at the (now offset) start and end of the connector line
-                    let start_circle_mesh = Mesh::new_circle(
-                        ctx,
-                        DrawMode::fill(),
-                        start_point_ggez, 
-                        CONNECTOR_CIRCLE_RADIUS,
-                        0.1, 
-                        CONNECTOR_CIRCLE_COLOR,
-                    )?;
+                    let start_circle_mesh = Mesh::new_circle(ctx, DrawMode::fill(), start_point_ggez, CONNECTOR_CIRCLE_RADIUS, 0.1, CONNECTOR_CIRCLE_COLOR)?;
                     canvas.draw(&start_circle_mesh, graphics::DrawParam::default());
-
-                    let end_circle_mesh = Mesh::new_circle(
-                        ctx,
-                        DrawMode::fill(),
-                        end_point_ggez, 
-                        CONNECTOR_CIRCLE_RADIUS,
-                        0.1, 
-                        CONNECTOR_CIRCLE_COLOR,
-                    )?;
+                    let end_circle_mesh = Mesh::new_circle(ctx, DrawMode::fill(), end_point_ggez, CONNECTOR_CIRCLE_RADIUS, 0.1, CONNECTOR_CIRCLE_COLOR)?;
                     canvas.draw(&end_circle_mesh, graphics::DrawParam::default());
                 }
             }
         }
 
-        // --- Draw Shapes, Outlines, and Text ---
         for (index, shape_data) in self.clicked_shapes.iter().enumerate() {
             let rect = Rect::new(
                 shape_data.center_position.x - self.default_shape_width / 2.0,
@@ -222,13 +220,7 @@ impl EventHandler<ggez::GameError> for AppState {
                 self.default_shape_height,
             );
             let shape_color_to_draw = self.default_shape_color;
-            let rounded_rect_mesh = Mesh::new_rounded_rectangle(
-                ctx,
-                DrawMode::fill(),
-                rect,
-                self.default_shape_corner_radius,
-                shape_color_to_draw,
-            )?;
+            let rounded_rect_mesh = Mesh::new_rounded_rectangle(ctx, DrawMode::fill(), rect, self.default_shape_corner_radius, shape_color_to_draw)?;
             canvas.draw(&rounded_rect_mesh, graphics::DrawParam::default());
 
             if self.selected_shape_index == Some(index) && self.editing_shape_index != Some(index) {
@@ -236,19 +228,8 @@ impl EventHandler<ggez::GameError> for AppState {
                 let center_y = rect.y + rect.h / 2.0;
                 let outline_w = rect.w * 1.05;
                 let outline_h = rect.h * 1.05;
-                let outline_bounds = Rect::new(
-                    center_x - outline_w / 2.0,
-                    center_y - outline_h / 2.0,
-                    outline_w,
-                    outline_h,
-                );
-                let outline_rect_mesh = Mesh::new_rounded_rectangle(
-                    ctx,
-                    DrawMode::stroke(self.selection_outline_width),
-                    outline_bounds,
-                    self.default_shape_corner_radius * 1.05,
-                    self.selection_outline_color,
-                )?;
+                let outline_bounds = Rect::new(center_x - outline_w / 2.0, center_y - outline_h / 2.0, outline_w, outline_h);
+                let outline_rect_mesh = Mesh::new_rounded_rectangle(ctx, DrawMode::stroke(self.selection_outline_width), outline_bounds, self.default_shape_corner_radius * 1.05, self.selection_outline_color)?;
                 canvas.draw(&outline_rect_mesh, graphics::DrawParam::default());
             }
 
@@ -271,23 +252,28 @@ impl EventHandler<ggez::GameError> for AppState {
 
         let status_text = format!(
             "Mouse: {:.0}, {:.0} | Shapes: {} {}{}",
-            self.live_mouse_pos.x,
+            self.live_mouse_pos.x, 
             self.live_mouse_pos.y,
             self.clicked_shapes.len(),
             if self.editing_shape_index.is_some() { "[EDITING]" } else { "" },
             if self.selected_shape_index.is_some() && self.editing_shape_index.is_none() { "[SELECTED]" } else { "" }
         );
         let mut text_display = graphics::Text::new(status_text);
-        text_display.set_scale(20.0);
+        text_display.set_scale(20.0); 
         canvas.draw(&text_display, graphics::DrawParam::default().dest(Vec2::new(10.0, 10.0)).color(Color::WHITE));
+        
         canvas.finish(ctx)?;
         Ok(())
     }
 
     fn mouse_button_down_event(&mut self, _ctx: &mut Context, button: MouseButton, x: f32, y: f32) -> GameResult {
+        // Manually scale physical mouse coordinates to logical coordinates
+        let logical_x = x / self.ui_scale;
+        let logical_y = y / self.ui_scale;
+
         if button == MouseButton::Left {
             let current_click_time = Instant::now();
-            let current_click_pos = Vec2::new(x, y);
+            let current_click_pos = Vec2::new(logical_x, logical_y); // Use logical coordinates
             let mut clicked_on_shape_details: Option<(usize, Vec2)> = None;
 
             for (index, shape_data) in self.clicked_shapes.iter().enumerate().rev() {
@@ -297,7 +283,7 @@ impl EventHandler<ggez::GameError> for AppState {
                     self.default_shape_width,
                     self.default_shape_height,
                 );
-                if shape_rect.contains(current_click_pos) {
+                if shape_rect.contains(current_click_pos) { // current_click_pos is now logical
                     clicked_on_shape_details = Some((index, shape_data.center_position));
                     break;
                 }
@@ -312,8 +298,9 @@ impl EventHandler<ggez::GameError> for AppState {
                 }
                 self.selected_shape_index = Some(clicked_idx);
                 let mut is_double_click_for_edit = false;
-                if let (Some(last_time), Some(last_pos)) = (self.last_click_time, self.last_click_pos) {
-                    if current_click_time.duration_since(last_time).as_millis() <= DOUBLE_CLICK_MAX_DELAY_MS && current_click_pos.distance(last_pos) <= DOUBLE_CLICK_MAX_DISTANCE {
+                if let (Some(last_time), Some(last_pos_val)) = (self.last_click_time, self.last_click_pos) { // Renamed last_pos to last_pos_val
+                    // last_pos_val is already logical, current_click_pos is now logical
+                    if current_click_time.duration_since(last_time).as_millis() <= DOUBLE_CLICK_MAX_DELAY_MS && current_click_pos.distance(last_pos_val) <= DOUBLE_CLICK_MAX_DISTANCE { // Use last_pos_val
                         is_double_click_for_edit = true;
                     }
                 }
@@ -325,9 +312,10 @@ impl EventHandler<ggez::GameError> for AppState {
                     self.last_click_pos = None;
                 } else {
                     self.dragged_shape_index = Some(clicked_idx);
+                    // drag_offset should be calculated using logical coordinates
                     self.drag_offset = Some(clicked_shape_center - current_click_pos);
                     self.last_click_time = Some(current_click_time);
-                    self.last_click_pos = Some(current_click_pos);
+                    self.last_click_pos = Some(current_click_pos); // Store logical position
                 }
             } else {
                 if let Some(editing_idx_val) = self.editing_shape_index.take() {
@@ -337,12 +325,14 @@ impl EventHandler<ggez::GameError> for AppState {
                 self.selected_shape_index = None;
                 self.dragged_shape_index = None;
                 let mut is_double_click_for_create = false;
-                if let (Some(last_time), Some(last_pos)) = (self.last_click_time, self.last_click_pos) {
-                    if current_click_time.duration_since(last_time).as_millis() <= DOUBLE_CLICK_MAX_DELAY_MS && current_click_pos.distance(last_pos) <= DOUBLE_CLICK_MAX_DISTANCE {
+                if let (Some(last_time), Some(last_pos_val)) = (self.last_click_time, self.last_click_pos) { // Renamed last_pos to last_pos_val
+                     // last_pos_val is already logical, current_click_pos is now logical
+                    if current_click_time.duration_since(last_time).as_millis() <= DOUBLE_CLICK_MAX_DELAY_MS && current_click_pos.distance(last_pos_val) <= DOUBLE_CLICK_MAX_DISTANCE { // Use last_pos_val
                         is_double_click_for_create = true;
                     }
                 }
                 if is_double_click_for_create {
+                    // current_click_pos is already logical
                     self.clicked_shapes.push(ShapeData { center_position: current_click_pos, text: None });
                     let new_idx = self.clicked_shapes.len() - 1;
                     self.selected_shape_index = Some(new_idx);
@@ -352,7 +342,7 @@ impl EventHandler<ggez::GameError> for AppState {
                     self.last_click_pos = None;
                 } else {
                     self.last_click_time = Some(current_click_time);
-                    self.last_click_pos = Some(current_click_pos);
+                    self.last_click_pos = Some(current_click_pos); // Store logical position
                 }
             }
         }
@@ -368,10 +358,16 @@ impl EventHandler<ggez::GameError> for AppState {
     }
 
     fn mouse_motion_event(&mut self, _ctx: &mut Context, x: f32, y: f32, _dx: f32, _dy: f32) -> GameResult {
-        self.live_mouse_pos = Vec2::new(x, y);
+        // Manually scale physical mouse coordinates to logical coordinates
+        let logical_x = x / self.ui_scale;
+        let logical_y = y / self.ui_scale;
+        
+        self.live_mouse_pos = Vec2::new(logical_x, logical_y); // Store logical coordinates
+
         if let Some(index) = self.dragged_shape_index {
-            if let Some(offset) = self.drag_offset {
+            if let Some(offset) = self.drag_offset { // offset is already logical
                 if index < self.clicked_shapes.len() {
+                    // live_mouse_pos is now logical, offset is logical
                     self.clicked_shapes[index].center_position = self.live_mouse_pos + offset;
                 }
             }
@@ -427,8 +423,9 @@ fn load_config() -> AppConfig {
         window: WindowConfig {
             width: 800.0,
             height: 600.0,
-            title: "Rust: Shapes - Offset Connectors (Default)".to_string(), // Updated title
+            title: "Rust: Shapes - UI Scale (Default)".to_string(), 
             msaa_level: None, 
+            ui_scale_factor: None, 
         },
         shape: ShapeConfig {
             width: 120.0,
@@ -474,9 +471,9 @@ fn load_config() -> AppConfig {
 }
 
 pub fn main() -> GameResult {
-    let config = load_config();
+    let app_config = load_config(); 
 
-    let msaa = match config.window.msaa_level {
+    let msaa = match app_config.window.msaa_level {
         Some(1) => NumSamples::One, 
         Some(4) => NumSamples::Four,
         Some(other) => {
@@ -491,19 +488,21 @@ pub fn main() -> GameResult {
     println!("Using MSAA level: {:?}", msaa);
 
 
-    let (mut ctx, event_loop) = ContextBuilder::new("shapes_app_offset_connectors", "YourName") // Updated app name
+    let (mut ctx, event_loop) = ContextBuilder::new("shapes_app_ui_scale", "YourName")
         .window_setup(
             WindowSetup::default()
-                .title(&config.window.title)
+                .title(&app_config.window.title)
                 .samples(msaa) 
         )
         .window_mode(
             WindowMode::default()
-                .dimensions(config.window.width, config.window.height)
+                .dimensions(app_config.window.width, app_config.window.height) 
                 .resizable(true)
         )
         .build()?;
-    let app_state = AppState::new(&mut ctx, &config.shape)?;
+    
+    let app_state = AppState::new(&mut ctx, &app_config)?;
+    
     event::run(ctx, event_loop, app_state)
 }
 
