@@ -3,7 +3,8 @@
 use ggez::conf::{WindowMode, WindowSetup};
 use ggez::event::{self, EventHandler, MouseButton};
 use ggez::glam::Vec2; // For 2D vectors (coordinates)
-use ggez::graphics::{self, Color, DrawMode, Mesh, Rect}; // Added Rect
+use ggez::graphics::{self, Color, DrawMode, Mesh, Rect, Text, TextLayout}; // Added Text, TextLayout
+use ggez::input::keyboard::{KeyCode, KeyInput}; // Added KeyCode, KeyInput
 use ggez::{Context, ContextBuilder, GameResult};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -17,7 +18,6 @@ struct WindowConfig {
     title: String,
 }
 
-// Renamed from CircleConfig to ShapeConfig and updated fields
 #[derive(Deserialize, Serialize, Debug, Clone)]
 struct ShapeConfig {
     width: f32,
@@ -26,50 +26,71 @@ struct ShapeConfig {
     color_r: u8,
     color_g: u8,
     color_b: u8,
+    // Future: text_color_r, text_color_g, text_color_b, font_size
 }
 
 #[derive(Deserialize, Serialize, Debug)]
 struct AppConfig {
     window: WindowConfig,
-    shape: ShapeConfig, // Renamed from circle to shape
+    shape: ShapeConfig,
 }
 
 // --- Constants for Double Click ---
-const DOUBLE_CLICK_MAX_DELAY_MS: u128 = 500; // Max milliseconds between clicks
-const DOUBLE_CLICK_MAX_DISTANCE: f32 = 10.0; // Max pixels mouse can move
+const DOUBLE_CLICK_MAX_DELAY_MS: u128 = 500;
+const DOUBLE_CLICK_MAX_DISTANCE: f32 = 10.0;
+
+// --- Data structure for individual shapes ---
+#[derive(Clone, Debug)]
+struct ShapeData {
+    center_position: Vec2,
+    text: Option<String>,
+    // Individual shapes could have their own visual properties later if needed
+}
 
 // --- AppState Struct ---
 struct AppState {
     live_mouse_pos: Vec2,
-    clicked_shapes_positions: Vec<Vec2>, // Stores center positions of shapes
-    shape_color: Color,
-    shape_width: f32,
-    shape_height: f32,
-    shape_corner_radius: f32,
+    // clicked_shapes_positions: Vec<Vec2>, // Replaced by clicked_shapes
+    clicked_shapes: Vec<ShapeData>, // Stores all shape data (pos, text)
+
+    // Default properties for new shapes from config
+    default_shape_color: Color,
+    default_shape_width: f32,
+    default_shape_height: f32,
+    default_shape_corner_radius: f32,
+
+    // Double-click detection
     last_click_time: Option<Instant>,
     last_click_pos: Option<Vec2>,
-    dragged_shape_index: Option<usize>, // Index of the shape currently being dragged
+
+    // Dragging state
+    dragged_shape_index: Option<usize>,
     drag_offset: Option<Vec2>,
+
+    // Text editing state
+    editing_shape_index: Option<usize>, // Index of shape being edited
+    current_input_text: String,         // Text currently being typed
 }
 
 impl AppState {
-    // Updated to take ShapeConfig
     fn new(_ctx: &mut Context, shape_config: &ShapeConfig) -> GameResult<AppState> {
         Ok(AppState {
             live_mouse_pos: Vec2::new(0.0, 0.0),
-            clicked_shapes_positions: Vec::new(),
-            shape_color: Color::from_rgb(
+            clicked_shapes: Vec::new(),
+            default_shape_color: Color::from_rgb(
                 shape_config.color_r,
                 shape_config.color_g,
                 shape_config.color_b,
             ),
-            shape_width: shape_config.width,
-            shape_height: shape_config.height,
-            shape_corner_radius: shape_config.corner_radius,
+            default_shape_width: shape_config.width,
+            default_shape_height: shape_config.height,
+            default_shape_corner_radius: shape_config.corner_radius,
             last_click_time: None,
             last_click_pos: None,
             dragged_shape_index: None,
             drag_offset: None,
+            editing_shape_index: None,
+            current_input_text: String::new(),
         })
     }
 }
@@ -77,37 +98,56 @@ impl AppState {
 // --- EventHandler Implementation ---
 impl EventHandler<ggez::GameError> for AppState {
     fn update(&mut self, _ctx: &mut Context) -> GameResult {
+        // If we were doing animations or physics, they'd go here.
         Ok(())
     }
 
     fn draw(&mut self, ctx: &mut Context) -> GameResult {
         let mut canvas = graphics::Canvas::from_frame(ctx, graphics::Color::from_rgb(30, 30, 40));
 
-        // Draw all stored rounded rectangles
-        for &center_pos in &self.clicked_shapes_positions {
-            // Calculate top-left corner for the Rect from the center position
+        for (index, shape_data) in self.clicked_shapes.iter().enumerate() {
             let rect = Rect::new(
-                center_pos.x - self.shape_width / 2.0,
-                center_pos.y - self.shape_height / 2.0,
-                self.shape_width,
-                self.shape_height,
+                shape_data.center_position.x - self.default_shape_width / 2.0,
+                shape_data.center_position.y - self.default_shape_height / 2.0,
+                self.default_shape_width,
+                self.default_shape_height,
             );
 
             let rounded_rect_mesh = Mesh::new_rounded_rectangle(
                 ctx,
                 DrawMode::fill(),
-                rect, // Use the calculated Rect
-                self.shape_corner_radius,
-                self.shape_color,
+                rect,
+                self.default_shape_corner_radius,
+                self.default_shape_color, // Using default color for all shapes for now
             )?;
             canvas.draw(&rounded_rect_mesh, graphics::DrawParam::default());
+
+            // Determine text to display for this shape
+            let text_to_display = if self.editing_shape_index == Some(index) {
+                // If editing this shape, show current input text (maybe with a cursor later)
+                format!("{}|", self.current_input_text) // Simple cursor
+            } else {
+                shape_data.text.clone().unwrap_or_default()
+            };
+
+            if !text_to_display.is_empty() || self.editing_shape_index == Some(index) {
+                 let mut text_obj = Text::new(text_to_display);
+                 text_obj.set_layout(TextLayout::center()); // Center align the text block
+                 // TODO: Make font size and color configurable
+                 text_obj.set_scale(18.0); // Example scale
+
+                 // Position the text at the center of the shape
+                 let text_dest = shape_data.center_position;
+                 canvas.draw(&text_obj, graphics::DrawParam::default().dest(text_dest).color(Color::BLACK));
+            }
         }
 
         let coords_text_string = format!(
-            "Mouse: {:.0}, {:.0} | Shapes: {}", // Changed "Circles" to "Shapes"
+            "Mouse: {:.0}, {:.0} | Shapes: {} {}",
             self.live_mouse_pos.x,
             self.live_mouse_pos.y,
-            self.clicked_shapes_positions.len()
+            self.clicked_shapes.len(),
+            if self.editing_shape_index.is_some() { "[EDITING]" } else { "" }
         );
         let mut text_display = graphics::Text::new(coords_text_string);
         text_display.set_scale(20.0);
@@ -133,56 +173,81 @@ impl EventHandler<ggez::GameError> for AppState {
         if button == MouseButton::Left {
             let current_click_time = Instant::now();
             let current_click_pos = Vec2::new(x, y);
-            let mut clicked_on_shape_to_drag = false;
+            let mut interacted_with_existing_shape = false;
 
-            // 1. Check if we clicked on an existing shape to start a drag.
-            for (index, &shape_center) in self.clicked_shapes_positions.iter().enumerate().rev() {
-                // Define the rectangle for hit detection
+            // Check for interaction with existing shapes (drag or double-click to edit)
+            for (index, shape_data) in self.clicked_shapes.iter().enumerate().rev() {
                 let shape_rect = Rect::new(
-                    shape_center.x - self.shape_width / 2.0,
-                    shape_center.y - self.shape_height / 2.0,
-                    self.shape_width,
-                    self.shape_height,
+                    shape_data.center_position.x - self.default_shape_width / 2.0,
+                    shape_data.center_position.y - self.default_shape_height / 2.0,
+                    self.default_shape_width,
+                    self.default_shape_height,
                 );
 
-                if shape_rect.contains(current_click_pos) { // Use Rect::contains for hit detection
-                    self.dragged_shape_index = Some(index);
-                    self.drag_offset = Some(shape_center - current_click_pos);
-                    clicked_on_shape_to_drag = true;
-                    println!("Starting drag for shape at index {}", index);
+                if shape_rect.contains(current_click_pos) {
+                    interacted_with_existing_shape = true;
+                    if let (Some(last_time), Some(last_pos)) = (self.last_click_time, self.last_click_pos) {
+                        let duration_since_last = current_click_time.duration_since(last_time).as_millis();
+                        let distance_from_last = current_click_pos.distance(last_pos);
 
-                    self.last_click_time = None;
-                    self.last_click_pos = None;
-                    break;
+                        if duration_since_last <= DOUBLE_CLICK_MAX_DELAY_MS && distance_from_last <= DOUBLE_CLICK_MAX_DISTANCE {
+                            println!("Double-click on shape {}: starting text edit.", index);
+                            self.editing_shape_index = Some(index);
+                            self.current_input_text = shape_data.text.clone().unwrap_or_default();
+                            self.dragged_shape_index = None; 
+                            self.last_click_time = None; 
+                            self.last_click_pos = None;
+                            break; 
+                        }
+                    }
+                    
+                    if self.editing_shape_index != Some(index) { 
+                        println!("Single-click on shape {}: starting drag.", index);
+                        self.dragged_shape_index = Some(index);
+                        self.drag_offset = Some(shape_data.center_position - current_click_pos);
+                        self.last_click_time = Some(current_click_time);
+                        self.last_click_pos = Some(current_click_pos);
+                    }
+                    break; 
                 }
             }
 
-            // 2. If not dragging, handle potential double-click for creation.
-            if !clicked_on_shape_to_drag {
+            if !interacted_with_existing_shape || (self.dragged_shape_index.is_none() && self.editing_shape_index.is_none() && !interacted_with_existing_shape) {
+                if self.editing_shape_index.is_some() && !interacted_with_existing_shape {
+                    if let Some(idx) = self.editing_shape_index.take() { // .take() to also clear editing_shape_index
+                         self.clicked_shapes[idx].text = if self.current_input_text.is_empty() { None } else { Some(self.current_input_text.clone()) };
+                         self.current_input_text.clear();
+                         println!("Clicked empty space while editing: text saved for shape {}.", idx);
+                    }
+                }
+
                 if let (Some(last_time), Some(last_pos)) = (self.last_click_time, self.last_click_pos) {
                     let duration_since_last = current_click_time.duration_since(last_time).as_millis();
                     let distance_from_last = current_click_pos.distance(last_pos);
 
-                    if duration_since_last <= DOUBLE_CLICK_MAX_DELAY_MS
-                        && distance_from_last <= DOUBLE_CLICK_MAX_DISTANCE
-                    {
-                        println!(
-                            "Double click on empty space at: ({}, {}) - New shape added.",
-                            current_click_pos.x, current_click_pos.y
-                        );
-                        self.clicked_shapes_positions.push(current_click_pos); // Store center position
+                    if duration_since_last <= DOUBLE_CLICK_MAX_DELAY_MS && distance_from_last <= DOUBLE_CLICK_MAX_DISTANCE {
+                        println!("Double-click on empty space: New shape added & now editing.");
+                        self.clicked_shapes.push(ShapeData {
+                            center_position: current_click_pos,
+                            text: None,
+                        });
+                        // Start editing the newly created shape
+                        let new_shape_index = self.clicked_shapes.len() - 1;
+                        self.editing_shape_index = Some(new_shape_index);
+                        self.current_input_text.clear(); // Ensure input text is empty for new shape
+                        self.dragged_shape_index = None; // Ensure not dragging
 
-                        self.last_click_time = None;
+                        self.last_click_time = None; 
                         self.last_click_pos = None;
                     } else {
                         self.last_click_time = Some(current_click_time);
                         self.last_click_pos = Some(current_click_pos);
-                        println!("Single click on empty space at: ({}, {}) (potential first of double)", x, y);
+                        println!("Single click on empty space.");
                     }
                 } else {
                     self.last_click_time = Some(current_click_time);
                     self.last_click_pos = Some(current_click_pos);
-                    println!("Single click on empty space at: ({}, {}) (potential first of double)", x, y);
+                    println!("Single click on empty space (first).");
                 }
             }
         }
@@ -219,8 +284,56 @@ impl EventHandler<ggez::GameError> for AppState {
         if let Some(index) = self.dragged_shape_index {
             if let Some(offset) = self.drag_offset {
                 let new_center = self.live_mouse_pos + offset;
-                if index < self.clicked_shapes_positions.len() {
-                    self.clicked_shapes_positions[index] = new_center;
+                if index < self.clicked_shapes.len() {
+                    self.clicked_shapes[index].center_position = new_center;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn text_input_event(&mut self, _ctx: &mut Context, character: char) -> GameResult {
+        if self.editing_shape_index.is_some() {
+            if !character.is_control() {
+                 self.current_input_text.push(character);
+            }
+        }
+        Ok(())
+    }
+
+    fn key_down_event(
+        &mut self,
+        _ctx: &mut Context,
+        input: KeyInput,
+        repeated: bool,
+    ) -> GameResult {
+        if repeated { 
+            return Ok(());
+        }
+
+        if let Some(keycode) = input.keycode {
+            if self.editing_shape_index.is_some() {
+                match keycode {
+                    KeyCode::Return | KeyCode::NumpadEnter => {
+                        if let Some(index) = self.editing_shape_index.take() { 
+                            self.clicked_shapes[index].text = if self.current_input_text.is_empty() {
+                                None
+                            } else {
+                                Some(self.current_input_text.clone())
+                            };
+                            self.current_input_text.clear();
+                            println!("Text editing finished for shape {}.", index);
+                        }
+                    }
+                    KeyCode::Escape => {
+                        self.editing_shape_index = None;
+                        self.current_input_text.clear();
+                        println!("Text editing cancelled.");
+                    }
+                    KeyCode::Back => { 
+                        self.current_input_text.pop();
+                    }
+                    _ => {} 
                 }
             }
         }
@@ -228,18 +341,16 @@ impl EventHandler<ggez::GameError> for AppState {
     }
 }
 
-// --- Configuration Loading Function ---
 fn load_config() -> AppConfig {
-    // Updated default configuration for shapes
     let default_config = AppConfig {
         window: WindowConfig {
             width: 800.0,
             height: 600.0,
-            title: "Rust: Drag & Double Click Rounded Rects (Default)".to_string(),
+            title: "Rust: Shapes with Text (Default Config)".to_string(),
         },
-        shape: ShapeConfig { // Renamed to shape
-            width: 100.0,
-            height: 60.0,
+        shape: ShapeConfig {
+            width: 120.0, 
+            height: 70.0,
             corner_radius: 10.0,
             color_r: 100,
             color_g: 200,
@@ -248,7 +359,6 @@ fn load_config() -> AppConfig {
     };
 
     let config_path = "config.toml";
-
     match fs::read_to_string(config_path) {
         Ok(contents) => match toml::from_str(&contents) {
             Ok(config) => {
@@ -256,18 +366,12 @@ fn load_config() -> AppConfig {
                 config
             }
             Err(e) => {
-                eprintln!(
-                    "Failed to parse {}: {}. Using default configuration.",
-                    config_path, e
-                );
+                eprintln!("Failed to parse {}: {}. Using default.", config_path, e);
                 default_config
             }
         },
         Err(_) => {
-            println!(
-                "{} not found. Using default configuration and creating a new one.",
-                config_path
-            );
+            println!("{} not found. Using default & creating new one.", config_path);
             match toml::to_string_pretty(&default_config) {
                 Ok(toml_string) => {
                     if let Err(e) = fs::write(config_path, toml_string) {
@@ -276,20 +380,16 @@ fn load_config() -> AppConfig {
                         println!("Default {} created.", config_path);
                     }
                 }
-                Err(e) => {
-                    eprintln!("Could not serialize default config: {}", e);
-                }
+                Err(e) => eprintln!("Could not serialize default config: {}", e),
             }
             default_config
         }
     }
 }
 
-// --- Main Function ---
 pub fn main() -> GameResult {
     let config = load_config();
-
-    let (mut ctx, event_loop) = ContextBuilder::new("configurable_rounded_rects_app", "YourName")
+    let (mut ctx, event_loop) = ContextBuilder::new("shapes_with_text_app", "YourName")
         .window_setup(WindowSetup::default().title(&config.window.title))
         .window_mode(
             WindowMode::default()
@@ -297,9 +397,7 @@ pub fn main() -> GameResult {
                 .resizable(true),
         )
         .build()?;
-
-    // Pass the shape config to AppState::new
     let app_state = AppState::new(&mut ctx, &config.shape)?;
-
     event::run(ctx, event_loop, app_state)
 }
+
