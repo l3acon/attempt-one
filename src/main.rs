@@ -26,7 +26,6 @@ struct ShapeConfig {
     color_r: u8,
     color_g: u8,
     color_b: u8,
-    // Future: text_color_r, text_color_g, text_color_b, font_size
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -38,20 +37,19 @@ struct AppConfig {
 // --- Constants for Double Click ---
 const DOUBLE_CLICK_MAX_DELAY_MS: u128 = 500;
 const DOUBLE_CLICK_MAX_DISTANCE: f32 = 10.0;
+const TEXT_PADDING: f32 = 8.0; // Padding from the rectangle's edge for the text
 
 // --- Data structure for individual shapes ---
 #[derive(Clone, Debug)]
 struct ShapeData {
     center_position: Vec2,
     text: Option<String>,
-    // Individual shapes could have their own visual properties later if needed
 }
 
 // --- AppState Struct ---
 struct AppState {
     live_mouse_pos: Vec2,
-    // clicked_shapes_positions: Vec<Vec2>, // Replaced by clicked_shapes
-    clicked_shapes: Vec<ShapeData>, // Stores all shape data (pos, text)
+    clicked_shapes: Vec<ShapeData>,
 
     // Default properties for new shapes from config
     default_shape_color: Color,
@@ -68,8 +66,8 @@ struct AppState {
     drag_offset: Option<Vec2>,
 
     // Text editing state
-    editing_shape_index: Option<usize>, // Index of shape being edited
-    current_input_text: String,         // Text currently being typed
+    editing_shape_index: Option<usize>,
+    current_input_text: String,
 }
 
 impl AppState {
@@ -98,7 +96,6 @@ impl AppState {
 // --- EventHandler Implementation ---
 impl EventHandler<ggez::GameError> for AppState {
     fn update(&mut self, _ctx: &mut Context) -> GameResult {
-        // If we were doing animations or physics, they'd go here.
         Ok(())
     }
 
@@ -118,27 +115,32 @@ impl EventHandler<ggez::GameError> for AppState {
                 DrawMode::fill(),
                 rect,
                 self.default_shape_corner_radius,
-                self.default_shape_color, // Using default color for all shapes for now
+                self.default_shape_color,
             )?;
             canvas.draw(&rounded_rect_mesh, graphics::DrawParam::default());
 
             // Determine text to display for this shape
             let text_to_display = if self.editing_shape_index == Some(index) {
-                // If editing this shape, show current input text (maybe with a cursor later)
                 format!("{}|", self.current_input_text) // Simple cursor
             } else {
                 shape_data.text.clone().unwrap_or_default()
             };
 
-            if !text_to_display.is_empty() || self.editing_shape_index == Some(index) {
-                 let mut text_obj = Text::new(text_to_display);
-                 text_obj.set_layout(TextLayout::center()); // Center align the text block
-                 // TODO: Make font size and color configurable
-                 text_obj.set_scale(18.0); // Example scale
+            // Only proceed with text drawing if there's text to show
+            if !text_to_display.is_empty() {
+                // Calculate the maximum width for the text block
+                let wrap_width = self.default_shape_width - (TEXT_PADDING * 2.0);
 
-                 // Position the text at the center of the shape
-                 let text_dest = shape_data.center_position;
-                 canvas.draw(&text_obj, graphics::DrawParam::default().dest(text_dest).color(Color::BLACK));
+                let mut text_obj = Text::new(text_to_display);
+                text_obj.set_layout(TextLayout::center()); // Center the text block horizontally and vertically
+                text_obj.set_scale(18.0);
+                // Set the bounds to enable text wrapping
+                // We provide the maximum width and infinite height so it wraps as many lines as needed.
+                text_obj.set_bounds(Vec2::new(wrap_width, f32::INFINITY));
+
+                // Position the text at the center of the shape
+                let text_dest = shape_data.center_position;
+                canvas.draw(&text_obj, graphics::DrawParam::default().dest(text_dest).color(Color::BLACK));
             }
         }
 
@@ -175,7 +177,6 @@ impl EventHandler<ggez::GameError> for AppState {
             let current_click_pos = Vec2::new(x, y);
             let mut interacted_with_existing_shape = false;
 
-            // Check for interaction with existing shapes (drag or double-click to edit)
             for (index, shape_data) in self.clicked_shapes.iter().enumerate().rev() {
                 let shape_rect = Rect::new(
                     shape_data.center_position.x - self.default_shape_width / 2.0,
@@ -194,30 +195,30 @@ impl EventHandler<ggez::GameError> for AppState {
                             println!("Double-click on shape {}: starting text edit.", index);
                             self.editing_shape_index = Some(index);
                             self.current_input_text = shape_data.text.clone().unwrap_or_default();
-                            self.dragged_shape_index = None; 
-                            self.last_click_time = None; 
+                            self.dragged_shape_index = None;
+                            self.last_click_time = None;
                             self.last_click_pos = None;
-                            break; 
+                            break;
                         }
                     }
-                    
-                    if self.editing_shape_index != Some(index) { 
+
+                    if self.editing_shape_index != Some(index) {
                         println!("Single-click on shape {}: starting drag.", index);
                         self.dragged_shape_index = Some(index);
                         self.drag_offset = Some(shape_data.center_position - current_click_pos);
                         self.last_click_time = Some(current_click_time);
                         self.last_click_pos = Some(current_click_pos);
                     }
-                    break; 
+                    break;
                 }
             }
 
-            if !interacted_with_existing_shape || (self.dragged_shape_index.is_none() && self.editing_shape_index.is_none() && !interacted_with_existing_shape) {
-                if self.editing_shape_index.is_some() && !interacted_with_existing_shape {
-                    if let Some(idx) = self.editing_shape_index.take() { // .take() to also clear editing_shape_index
-                         self.clicked_shapes[idx].text = if self.current_input_text.is_empty() { None } else { Some(self.current_input_text.clone()) };
-                         self.current_input_text.clear();
-                         println!("Clicked empty space while editing: text saved for shape {}.", idx);
+            if !interacted_with_existing_shape {
+                if self.editing_shape_index.is_some() {
+                    if let Some(idx) = self.editing_shape_index.take() {
+                        self.clicked_shapes[idx].text = if self.current_input_text.is_empty() { None } else { Some(self.current_input_text.clone()) };
+                        self.current_input_text.clear();
+                        println!("Clicked empty space while editing: text saved for shape {}.", idx);
                     }
                 }
 
@@ -231,36 +232,26 @@ impl EventHandler<ggez::GameError> for AppState {
                             center_position: current_click_pos,
                             text: None,
                         });
-                        // Start editing the newly created shape
                         let new_shape_index = self.clicked_shapes.len() - 1;
                         self.editing_shape_index = Some(new_shape_index);
-                        self.current_input_text.clear(); // Ensure input text is empty for new shape
-                        self.dragged_shape_index = None; // Ensure not dragging
-
-                        self.last_click_time = None; 
+                        self.current_input_text.clear();
+                        self.dragged_shape_index = None;
+                        self.last_click_time = None;
                         self.last_click_pos = None;
                     } else {
                         self.last_click_time = Some(current_click_time);
                         self.last_click_pos = Some(current_click_pos);
-                        println!("Single click on empty space.");
                     }
                 } else {
                     self.last_click_time = Some(current_click_time);
                     self.last_click_pos = Some(current_click_pos);
-                    println!("Single click on empty space (first).");
                 }
             }
         }
         Ok(())
     }
 
-    fn mouse_button_up_event(
-        &mut self,
-        _ctx: &mut Context,
-        button: MouseButton,
-        _x: f32,
-        _y: f32,
-    ) -> GameResult {
+    fn mouse_button_up_event(&mut self, _ctx: &mut Context, button: MouseButton, _x: f32, _y: f32) -> GameResult {
         if button == MouseButton::Left {
             if self.dragged_shape_index.is_some() {
                 println!("Dropped shape at: ({:.0}, {:.0})", self.live_mouse_pos.x, self.live_mouse_pos.y);
@@ -271,16 +262,8 @@ impl EventHandler<ggez::GameError> for AppState {
         Ok(())
     }
 
-    fn mouse_motion_event(
-        &mut self,
-        _ctx: &mut Context,
-        x: f32,
-        y: f32,
-        _dx: f32,
-        _dy: f32,
-    ) -> GameResult {
+    fn mouse_motion_event(&mut self, _ctx: &mut Context, x: f32, y: f32, _dx: f32, _dy: f32) -> GameResult {
         self.live_mouse_pos = Vec2::new(x, y);
-
         if let Some(index) = self.dragged_shape_index {
             if let Some(offset) = self.drag_offset {
                 let new_center = self.live_mouse_pos + offset;
@@ -293,29 +276,22 @@ impl EventHandler<ggez::GameError> for AppState {
     }
 
     fn text_input_event(&mut self, _ctx: &mut Context, character: char) -> GameResult {
-        if self.editing_shape_index.is_some() {
-            if !character.is_control() {
-                 self.current_input_text.push(character);
-            }
+        if self.editing_shape_index.is_some() && !character.is_control() {
+            self.current_input_text.push(character);
         }
         Ok(())
     }
 
-    fn key_down_event(
-        &mut self,
-        _ctx: &mut Context,
-        input: KeyInput,
-        repeated: bool,
-    ) -> GameResult {
-        if repeated { 
-            return Ok(());
-        }
-
+    fn key_down_event(&mut self, _ctx: &mut Context, input: KeyInput, repeated: bool) -> GameResult {
         if let Some(keycode) = input.keycode {
             if self.editing_shape_index.is_some() {
                 match keycode {
                     KeyCode::Return | KeyCode::NumpadEnter => {
-                        if let Some(index) = self.editing_shape_index.take() { 
+                        // Prevent Return/Enter from repeating if key is held down
+                        if repeated {
+                            return Ok(());
+                        }
+                        if let Some(index) = self.editing_shape_index.take() {
                             self.clicked_shapes[index].text = if self.current_input_text.is_empty() {
                                 None
                             } else {
@@ -326,14 +302,27 @@ impl EventHandler<ggez::GameError> for AppState {
                         }
                     }
                     KeyCode::Escape => {
+                        // Prevent Escape from repeating if key is held down
+                        if repeated {
+                            return Ok(());
+                        }
                         self.editing_shape_index = None;
                         self.current_input_text.clear();
                         println!("Text editing cancelled.");
                     }
-                    KeyCode::Back => { 
+                    KeyCode::Back => {
+                        // Allow Backspace to repeat (i.e., process it even if `repeated` is true)
+                        // The OS handles the repeat rate for us.
                         self.current_input_text.pop();
                     }
-                    _ => {} 
+                    _ => {
+                        // For any other key press during text editing that isn't handled above,
+                        // if it's a repeated event, we can ignore it here as actual character input
+                        // is handled by `text_input_event`.
+                        if repeated {
+                            return Ok(());
+                        }
+                    }
                 }
             }
         }
@@ -349,7 +338,7 @@ fn load_config() -> AppConfig {
             title: "Rust: Shapes with Text (Default Config)".to_string(),
         },
         shape: ShapeConfig {
-            width: 120.0, 
+            width: 120.0,
             height: 70.0,
             corner_radius: 10.0,
             color_r: 100,
@@ -400,4 +389,3 @@ pub fn main() -> GameResult {
     let app_state = AppState::new(&mut ctx, &config.shape)?;
     event::run(ctx, event_loop, app_state)
 }
-
